@@ -157,6 +157,28 @@ def test_get_logger_routes_to_named_stdlib_logger(
     assert "n=2" in message
 
 
+def test_get_logger_uses_stdlib_when_structlog_is_unconfigured(
+    caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+) -> None:
+    structlog.reset_defaults()
+    assert not structlog.is_configured()
+    logger = get_logger("engine", engine_id="e1").bind(request_id="r1")
+    with caplog.at_level(logging.INFO, logger=ROOT_LOGGER_NAME):
+        logger.debug("filtered")
+        logger.info("hello", n=2)
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            logger.exception("failed")
+    # structlog's default PrintLogger would have written these to stdout.
+    assert capsys.readouterr().out == ""
+    hello, failed = [r for r in caplog.records if r.name == "retrievalloom.engine"]
+    assert hello.getMessage() == "event='hello' engine_id='e1' n=2 request_id='r1'"
+    assert hello.levelno == logging.INFO
+    assert failed.levelno == logging.ERROR
+    assert "ValueError: boom" in failed.getMessage()
+
+
 # --- package facade --------------------------------------------------------------------
 
 

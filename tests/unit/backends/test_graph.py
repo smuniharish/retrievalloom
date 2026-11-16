@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 
     from retrievalloom.contracts.component import ComponentContext
     from retrievalloom.graph.ladybug_store import LadybugGraphStore
+    from retrievalloom.runtime.offloader import Offloader
 
 SCOPE = Scope(tenant_id="tenant-a")
 OTHER = Scope(tenant_id="tenant-b")
@@ -389,6 +390,40 @@ async def test_ladybug_cancelled_initialize_closes_the_late_open(
     assert store._database is None
     assert store._connection is None
     assert (await store.health()).status is HealthStatus.UNHEALTHY
+
+
+@pytest.mark.graph
+async def test_ladybug_close_after_the_offloader_stopped(
+    context: ComponentContext, offloader: Offloader
+) -> None:
+    from retrievalloom.graph.ladybug_store import LadybugGraphStore
+
+    store = LadybugGraphStore()
+    await store.initialize(context)
+    await offloader.close()
+    # App-owned components may be closed after the engine (and its offloader) closed.
+    await store.close()
+    assert store._database is None
+
+
+@pytest.mark.graph
+async def test_ladybug_close_failure_is_wrapped(
+    context: ComponentContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from retrievalloom.graph.ladybug_store import LadybugGraphStore
+
+    store = LadybugGraphStore()
+    await store.initialize(context)
+
+    def refuse() -> None:
+        raise RuntimeError("busy")
+
+    monkeypatch.setattr(store, "_close_sync", refuse)
+    with pytest.raises(BackendError, match="ladybug close failed"):
+        await store.close()
+    assert store._executor is None
+    monkeypatch.undo()
+    store._close_sync()  # release the database the refused close left open
 
 
 @pytest.mark.graph

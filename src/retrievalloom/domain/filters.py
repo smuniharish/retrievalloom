@@ -147,10 +147,10 @@ def evaluate(expression: FilterExpression | None, record: Mapping[str, Any]) -> 
 
 
 def _values_equal(left: Any, right: Any) -> bool:
-    if isinstance(left, bool) != isinstance(right, bool):
-        return False
     if isinstance(left, list) and not isinstance(right, list):
         return any(_values_equal(item, right) for item in left)
+    if isinstance(left, bool) != isinstance(right, bool):
+        return False
     return left == right
 
 

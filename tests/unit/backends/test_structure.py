@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
     from retrievalloom.contracts.component import ComponentContext
     from retrievalloom.domain.retrieval import RetrievalHit
+    from retrievalloom.runtime.offloader import Offloader
     from retrievalloom.structure.treesearch_engine import TreeSearchStructureEngine
 
 pytestmark = pytest.mark.structure
@@ -133,6 +134,19 @@ async def test_lifecycle_before_initialize(context: ComponentContext) -> None:
     assert (await store.health()).status is HealthStatus.HEALTHY
     await store.close()
     await store.close()
+
+
+async def test_close_after_the_offloader_stopped(
+    context: ComponentContext, offloader: Offloader
+) -> None:
+    store = make_engine()
+    await store.initialize(context)
+    await store.create_generation(SCOPE, spec())
+    await store.write(SCOPE, "gen", BOOK)
+    await offloader.close()
+    # App-owned components may be closed after the engine (and its offloader) closed.
+    await store.close()
+    assert (await store.health()).message == "not initialised"
 
 
 async def test_write_validation(engine: TreeSearchStructureEngine) -> None:

@@ -570,6 +570,23 @@ async def test_get_coverage_chunks_large_lists(store: SQLiteMetadataStore) -> No
     assert len(rows) == CHUNK + 1
 
 
+async def test_coverage_upsert_applies_repeated_keys_in_order(
+    store: SQLiteMetadataStore,
+) -> None:
+    async with store.transaction(SCOPE, write=True) as tx:
+        await tx.upsert_coverage([coverage(SCOPE, "d", CoverageState.FAILED, last_error=ERROR)])
+        await tx.upsert_coverage(
+            [
+                coverage(SCOPE, "d", CoverageState.PENDING, attempts=3),
+                coverage(SCOPE, "d", CoverageState.READY, indexed_version=1),
+            ]
+        )
+    async with store.transaction(SCOPE, write=False) as tx:
+        row = (await tx.get_coverage(UNIT, [uid(SCOPE, "d")]))[uid(SCOPE, "d")]
+    assert (row.state, row.indexed_version, row.attempts) == (CoverageState.READY, 1, 0)
+    assert (row.last_error, row.row_revision) == (None, 3)
+
+
 async def test_set_document_coverage_state_touches_every_unit(store: SQLiteMetadataStore) -> None:
     async with store.transaction(SCOPE, write=True) as tx:
         await tx.upsert_coverage(

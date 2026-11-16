@@ -13,6 +13,7 @@ from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import event
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -1167,39 +1168,48 @@ class SQLiteTransaction(MetadataTransactionABC):
         """Insert or replace coverage rows."""
         self._require_write()
         table = t.coverage
+        rows: list[dict[str, Any]] = []
         for record in records:
             self._guard(record.scope_key)
-            keys = {
-                "scope_key": record.scope_key,
-                "document_uid": record.document_uid,
-                "channel": record.channel.value,
-                "method": record.method,
-                "instance": record.backend_instance_id,
-            }
-            values = {
-                "generation_id": record.generation_id,
-                "target_version": record.target_version,
-                "indexed_version": record.indexed_version,
-                "indexed_metadata_revision": record.indexed_metadata_revision,
-                "dependency_fingerprint": record.dependency_fingerprint,
-                "state": record.state.value,
-                "attempts": record.attempts,
-                "last_error": None
-                if record.last_error is None
-                else record.last_error.model_dump(mode="json"),
-                "lease_owner": record.lease_owner,
-                "lease_epoch": record.lease_epoch,
-                "lease_expires_at": record.lease_expires_at,
-                "updated_at": record.updated_at,
-            }
-            condition = sa.and_(*(table.c[name] == value for name, value in keys.items()))
-            result = await self._exec(
-                sa.update(table)
-                .where(condition)
-                .values(**values, row_revision=table.c.row_revision + 1)
+            rows.append(
+                {
+                    "scope_key": record.scope_key,
+                    "document_uid": record.document_uid,
+                    "channel": record.channel.value,
+                    "method": record.method,
+                    "instance": record.backend_instance_id,
+                    "generation_id": record.generation_id,
+                    "target_version": record.target_version,
+                    "indexed_version": record.indexed_version,
+                    "indexed_metadata_revision": record.indexed_metadata_revision,
+                    "dependency_fingerprint": record.dependency_fingerprint,
+                    "state": record.state.value,
+                    "attempts": record.attempts,
+                    "last_error": None
+                    if record.last_error is None
+                    else record.last_error.model_dump(mode="json"),
+                    "lease_owner": record.lease_owner,
+                    "lease_epoch": record.lease_epoch,
+                    "lease_expires_at": record.lease_expires_at,
+                    "updated_at": record.updated_at,
+                    "row_revision": 1,
+                }
             )
-            if result.rowcount == 0:
-                await self._exec(sa.insert(table).values(**keys, **values, row_revision=1))
+        keys = [column.name for column in table.primary_key.columns]
+        # One statement per chunk; 50 rows keeps the bind count under SQLite's 999 limit.
+        for chunk in _chunks(rows, 50):
+            statement = sqlite_insert(table).values(list(chunk))
+            updates: dict[str, Any] = {
+                name: statement.excluded[name]
+                for name in chunk[0]
+                if name not in keys and name != "row_revision"
+            }
+            await self._exec(
+                statement.on_conflict_do_update(
+                    index_elements=keys,
+                    set_={**updates, "row_revision": table.c.row_revision + 1},
+                )
+            )
 
     async def get_coverage(
         self, unit: UnitKey, document_uids: Sequence[str]
@@ -1665,5 +1675,5 @@ def _contribution(row: Any) -> ObjectContribution:
     )
 
 
-def _chunks(values: Sequence[str], size: int = 500) -> list[Sequence[str]]:
+def _chunks[T](values: Sequence[T], size: int = 500) -> list[Sequence[T]]:
     return [values[index : index + size] for index in range(0, len(values), size)]

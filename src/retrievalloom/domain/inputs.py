@@ -229,7 +229,20 @@ Representation = Annotated[
 
 
 class DocumentInput(VersionedModel):
-    """One document appearance submitted by the application."""
+    """One document appearance submitted by the application.
+
+    Every representation is validated, hashed and stored with the version, but each
+    channel indexes exactly one of them:
+
+    - index channel: the first ``chunks`` representation, otherwise the first ``text``
+      representation (indexed as a single chunk);
+    - structure channel: the first ``structure`` representation;
+    - graph channel: the first ``graph`` representation, otherwise the app's graph
+      extractor runs on the index channel's representation.
+
+    Further representations of the same kind are kept (and change the content hash)
+    but are not retrievable.
+    """
 
     id: Identifier = Field(alias="_id")
     scope: Scope | None = None

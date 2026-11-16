@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from retrievalloom.contracts.component import ComponentContext
     from retrievalloom.domain.filters import FilterExpression
     from retrievalloom.domain.retrieval import RetrievalHit
+    from retrievalloom.runtime.offloader import Offloader
 
 SCOPE = Scope(tenant_id="tenant-a")
 OTHER = Scope(tenant_id="tenant-b")
@@ -307,6 +308,18 @@ async def test_persistent_path_resolves_generations_after_restart(
         assert await second.list_generations(SCOPE) == ["g2", "g3"]
     finally:
         await second.close()
+
+
+async def test_close_after_the_offloader_stopped(
+    context: ComponentContext, offloader: Offloader
+) -> None:
+    store = QdrantVectorStore()
+    await store.initialize(context)
+    await store.create_generation(SCOPE, spec("g2"))
+    await offloader.close()
+    # App-owned components may be closed after the engine (and its offloader) closed.
+    await store.close()
+    assert store._client is None
 
 
 # application-owned client (server code path) -----------------------------------------------

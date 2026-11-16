@@ -238,8 +238,6 @@ class Evidence(VersionedModel):
 class WarningCode(StrEnum):
     """Stable retrieval and ingestion warning codes."""
 
-    CHANNEL_DISABLED = "channel_disabled"
-    METHOD_DISABLED = "method_disabled"
     METHOD_UNAVAILABLE = "method_unavailable"
     INDEX_MISSING = "index_missing"
     PARTIAL_COVERAGE = "partial_coverage"
@@ -254,7 +252,6 @@ class WarningCode(StrEnum):
     PROVENANCE_RECORDING_FAILED = "provenance_recording_failed"
     FILTER_POST_APPLIED = "filter_post_applied"
     POSSIBLE_REDELIVERY = "possible_redelivery"
-    REDELIVERY_ADVISORY_ONLY = "redelivery_advisory_only"
     INDEX_WAIT_TIMEOUT = "index_wait_timeout"
 
 

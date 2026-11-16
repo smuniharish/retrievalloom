@@ -10,7 +10,7 @@ from pydantic import Field, model_validator
 
 from retrievalloom.domain.base import FrozenModel, Identifier
 from retrievalloom.domain.hashing import HASH_PROFILE, SUPPORTED_HASH_PROFILES
-from retrievalloom.domain.records import Channel, IndexingMode, IndexMethod, MissingIndexPolicy
+from retrievalloom.domain.records import Channel, IndexMethod, MissingIndexPolicy
 from retrievalloom.runtime.offloader import OffloaderConfig
 
 if TYPE_CHECKING:
@@ -224,7 +224,6 @@ class RetrievalConfig(FrozenModel):
     reranking: RerankingConfig = Field(default_factory=RerankingConfig)
     nli: NLIConfig = Field(default_factory=NLIConfig)
     consolidation: ConsolidationConfig = Field(default_factory=ConsolidationConfig)
-    indexing_mode: IndexingMode = IndexingMode.INCREMENTAL
     missing_index_policy: MissingIndexPolicy = MissingIndexPolicy.SKIP
     default_top_k: int = Field(default=10, ge=1)
     max_query_chars: int = Field(default=4096, ge=1)
@@ -257,7 +256,10 @@ class LifecycleConfig(FrozenModel):
         instance_ttl: Seconds an engine-instance registration lives without heartbeat.
         lease_ttl: Seconds a durable reader lease lives.
         generation_retention: Seconds a retired generation is kept before dropping.
-        auto_rebuild_ephemeral: Rebuild ephemeral backends from metadata at startup.
+        auto_rebuild_ephemeral: Rebuild ephemeral backends from metadata at
+            startup. Without ``background`` the rebuild completes before the
+            engine opens; with it, the rebuild runs in the background and
+            retrievals report ``index_missing`` until it finishes.
         migration: Metadata schema policy (``auto`` or ``verify``).
         shutdown_timeout: Seconds ``close`` waits for in-flight work.
     """

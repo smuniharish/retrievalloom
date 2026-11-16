@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 from concurrent.futures import ThreadPoolExecutor
@@ -155,13 +156,21 @@ class LadybugGraphStore(GraphStoreABC):
         self._database = None
 
     async def close(self) -> None:
-        """Close the database (idempotent)."""
+        """Close the database (idempotent; works after the engine's offloader stopped)."""
         executor = self._executor
         if executor is None:
             return
+
+        def call() -> None:
+            try:
+                self._close_sync()
+            except RuntimeError as exc:
+                raise BackendError("ladybug close failed", details={"error": str(exc)}) from exc
+
         try:
             # Queued on the single worker, so it also runs after an open still in flight.
-            await self._run(None, lambda _connection: self._close_sync(), require_open=False)
+            # Closing only releases resources, so it bypasses offloader admission.
+            await asyncio.get_running_loop().run_in_executor(executor, call)
         finally:
             self._executor = None
             executor.shutdown(wait=False)

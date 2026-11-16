@@ -84,7 +84,6 @@ class IngestOutcome(StrEnum):
     UNCHANGED = "unchanged"
     REVIVED = "revived"
     REPLAYED = "replayed"
-    SUSPECTED_REDELIVERY = "suspected_redelivery"
     REJECTED = "rejected"
     FAILED = "failed"
 
@@ -304,11 +303,6 @@ class TaskKind(StrEnum):
     INGEST_INDEX = "ingest_index"
     BACKFILL = "backfill"
     REBUILD = "rebuild"
-    REEMBED = "reembed"
-    REEXTRACT = "reextract"
-    PROJECTION_REFRESH = "projection_refresh"
-    PURGE = "purge"
-    RECONCILE = "reconcile"
 
 
 class TaskState(StrEnum):
@@ -319,14 +313,6 @@ class TaskState(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
-
-
-class IndexingMode(StrEnum):
-    """How document changes reach backends."""
-
-    LOCKED = "locked"
-    INCREMENTAL = "incremental"
-    REBUILD = "rebuild"
 
 
 class MissingIndexPolicy(StrEnum):

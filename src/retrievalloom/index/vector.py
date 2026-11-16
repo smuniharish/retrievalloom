@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import math
 import uuid
@@ -238,11 +239,11 @@ class QdrantVectorStore(VectorStoreABC):
         if client is not None and self._owns_client:
             if isinstance(client, AsyncQdrantClient):
                 await client.close()
-            # An owned sync client only exists once initialize set both; the check narrows types.
-            elif self._offloader is not None and self._executor is not None:  # pragma: no branch
-                await self._offloader.run(
-                    WorkloadKind.VECTOR, client.close, executor=self._executor
-                )
+            # An owned sync client only exists once initialize created the executor; the
+            # check narrows types. Closing bypasses offloader admission, so it also works
+            # after the engine's offloader stopped.
+            elif self._executor is not None:  # pragma: no branch
+                await asyncio.get_running_loop().run_in_executor(self._executor, client.close)
         if self._executor is not None:
             self._executor.shutdown(wait=True)
             self._executor = None

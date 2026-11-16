@@ -106,7 +106,7 @@ class HealthReport(FrozenModel):
 
 
 class GenerationStatus(FrozenModel):
-    """Active generation of one method."""
+    """One generation of one method and its state (active, building, retired, ...)."""
 
     method: str
     generation_id: str

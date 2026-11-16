@@ -1,0 +1,82 @@
+# Run several engines on one store
+
+Several engines, in one process or many, can share indexes. They must share:
+
+- one metadata store (for example the same SQLite file), and
+- the same durable backend location (for example one Qdrant server and
+  `collection_prefix`).
+
+Each engine then sees the others' writes, generations and lifecycle tasks.
+
+```python
+from retrievalloom import Components, RetrievalEngine
+from retrievalloom.index.vector import QdrantVectorStore
+from retrievalloom.storage.sqlite import SQLiteMetadataStore
+
+
+def make_engine(embedding) -> RetrievalEngine:
+    return RetrievalEngine(
+        components=Components(
+            metadata_store=SQLiteMetadataStore("shared/metadata.db"),
+            embedding=embedding,
+            vector_store=QdrantVectorStore(url="http://qdrant:6333", collection_prefix="docs"),
+        )
+    )
+```
+
+Every engine needs its own component instances; only the underlying storage
+is shared. Use the same embedding model (same identity and dimensions) in every
+engine: a different model fingerprint makes the shared generation stale for
+that engine.
+
+## What is shared and what is not
+
+| Unit | Shared between engines |
+| --- | --- |
+| Dense (Qdrant server, or another durable store) | Yes. One generation, built once. |
+| Keyword, fuzzy, sparse (in memory) | No. Each engine builds and keeps its own generation. |
+| Graph, structure | Only if every engine can open the same backend location. LadybugDB files and Qdrant local-mode directories are opened by one process at a time. |
+
+Rows of an engine's in-memory generations carry its instance id. They are
+deleted when the engine closes, or by another engine's maintenance round when
+its registration expires (`LifecycleConfig.instance_ttl`, default 120 s,
+renewed by a heartbeat every round).
+
+## Reader leases
+
+A rebuild publishes a new generation and retires the old one. The old one must
+not be dropped while another engine still reads from it. Durable reader leases
+guarantee this:
+
+- While an engine reads a durable generation, it holds a reader lease on it in
+  the metadata store, per generation and per engine instance.
+- A lease lasts `LifecycleConfig.lease_ttl` (default 120 s). The engine renews
+  it on a read when less than half the TTL remains.
+- Retiring a generation waits until no **other** engine holds an unexpired
+  lease on it. The retiring engine's own readers are tracked in process.
+- After an engine's last read, its lease can persist for up to `lease_ttl`. If
+  the engine closes, it deregisters and its leases are deleted at once.
+- Expired leases are purged by the maintenance round.
+- `LifecycleConfig.generation_retention` (default 0 s) delays the drop
+  further.
+
+In-memory backends need no leases: their generations belong to one engine.
+
+Choose `lease_ttl` longer than your longest request. A crashed engine delays
+the drop of a retired generation by at most `lease_ttl`; its registration
+and in-memory rows are purged after `instance_ttl`.
+
+## Who runs the lifecycle
+
+Every engine with `background=True` (the default) runs lifecycle rounds.
+Generation pointers are switched with compare-and-swap in the metadata store,
+so several schedulers on one store are safe.
+
+An engine with `LifecycleConfig(background=False)` runs rounds only when you
+ask: on its own `ingest` and `delete`, `wait_for`, and
+`run_lifecycle_once()`. Call `engine.run_lifecycle_once()` periodically, at
+least every `instance_ttl`. The round renews the engine's registration, and
+indexes documents written by other engines into its in-memory indexes.
+Without it, those documents are missing from its keyword, fuzzy and sparse
+results, and other engines purge its in-memory rows once its registration
+expires.

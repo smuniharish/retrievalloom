@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 from rapidfuzz import fuzz, process
 
 from retrievalloom.contracts.component import ComponentInfo, make_info
@@ -50,7 +51,8 @@ class RapidFuzzIndex(FuzzyIndexABC, InMemoryGenerationalIndex):
     The vocabulary holds the generation's dictionary surface forms (posted to objects
     that contain them, word-bounded) and, when ``corpus_vocabulary`` is set, corpus
     tokens of at least ``min_token_length`` characters. Query n-grams (1..``max_ngram``
-    tokens) are matched with ``rapidfuzz.process.extract`` (``WRatio``); an object's score
+    tokens) are scored with ``rapidfuzz.process.cdist`` (``WRatio``, GIL released) and
+    the best five vocabulary terms per n-gram are kept; an object's score
     is the sum over matched vocabulary terms of the best similarity / 100.
 
     Args:
@@ -131,17 +133,24 @@ class RapidFuzzIndex(FuzzyIndexABC, InMemoryGenerationalIndex):
         return grams
 
     def _match_sync(self, structure: _FuzzyStructure, grams: list[str]) -> dict[str, tuple]:
+        # cdist releases the GIL while scoring (process.extract does not), so the
+        # offloaded match cannot stall the application's event loop.
+        matrix = process.cdist(
+            grams,
+            structure.vocabulary,
+            scorer=_SCORER,
+            score_cutoff=self._cutoff,
+            dtype=np.float64,
+            workers=1,
+        )
         best: dict[str, tuple[float, str]] = {}
-        for gram in grams:
-            for term, similarity, _index in process.extract(
-                gram,
-                structure.vocabulary,
-                scorer=_SCORER,
-                score_cutoff=self._cutoff,
-                limit=_MATCHES_PER_NGRAM,
-            ):
+        for gram, row in zip(grams, matrix, strict=True):
+            candidates = np.flatnonzero(row >= self._cutoff).tolist()
+            candidates.sort(key=lambda index: (-row[index], index))
+            for index in candidates[:_MATCHES_PER_NGRAM]:
+                term, similarity = structure.vocabulary[index], float(row[index])
                 if term not in best or similarity > best[term][0]:
-                    best[term] = (float(similarity), gram)
+                    best[term] = (similarity, gram)
         return best
 
     async def search(

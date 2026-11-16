@@ -232,6 +232,18 @@ async def test_fuzzy_keeps_best_similarity_per_term(context: ComponentContext) -
     assert await index.search(SCOPE, "gen", FuzzyQuery(tokens=("asyncio",)), 10, None) == []
 
 
+async def test_fuzzy_keeps_five_best_terms_per_gram(context: ComponentContext) -> None:
+    index = await ready(RapidFuzzIndex(score_cutoff=80, max_ngram=1), context)
+    await index.create_generation(SCOPE, spec("gen"))
+    words = ["parsers", "parsera", "parserb", "parserc", "parserd", "parsere", "parser"]
+    await index.write(SCOPE, "gen", [item(word, word) for word in words])
+    await index.seal(SCOPE, "gen")
+    hits = await index.search(SCOPE, "gen", FuzzyQuery(tokens=("parser",)), 10, None)
+    # The exact term ranks first; equal-score ties keep vocabulary order up to the cap.
+    assert names(hits)[0] == "parser"
+    assert set(names(hits)) == {"parser", "parsera", "parserb", "parserc", "parserd"}
+
+
 # sparse ------------------------------------------------------------------------------------
 @pytest.mark.parametrize("kwargs", [{"k1": 0.0}, {"b": -0.1}, {"b": 1.5}])
 def test_sparse_rejects_invalid_parameters(kwargs: dict[str, Any]) -> None:

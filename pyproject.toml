@@ -68,7 +68,7 @@ all = ["retrievalloom[graph,structure]"]
 [project.urls]
 Homepage = "https://github.com/smuniharish/retrievalloom"
 Documentation = "https://retrievalloom.readthedocs.io/"
-Changelog = "https://github.com/smuniharish/retrievalloom/blob/master/CHANGELOG.md"
+Changelog = "https://github.com/smuniharish/retrievalloom/blob/main/CHANGELOG.md"
 Issues = "https://github.com/smuniharish/retrievalloom/issues"
 Repository = "https://github.com/smuniharish/retrievalloom"
 
@@ -171,7 +171,7 @@ docstring-code-format = true
 
 [tool.pyrefly]
 project-includes = ["src", "tests", "examples", "scripts"]
-search-path = ["src", "."]
+search-path = ["src", ".", "examples"]
 
 [tool.coverage.run]
 branch = true

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -158,12 +159,16 @@ class TreeSearchStructureEngine(StructureEngineABC):
         )
 
     async def close(self) -> None:
-        """Close every index (idempotent)."""
+        """Close every index (idempotent; works after the engine's offloader stopped)."""
         if self._executor is None:
             return
         generations = list(self._generations.values())
         self._generations.clear()
-        await self._run(None, lambda: [generation.index.close() for generation in generations])
+        # Closing only releases resources, so it bypasses offloader admission and runs
+        # on this component's own SQLite thread directly.
+        await asyncio.get_running_loop().run_in_executor(
+            self._executor, lambda: [generation.index.close() for generation in generations]
+        )
         self._executor.shutdown(wait=True)
         self._executor = None
 

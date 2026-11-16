@@ -1,0 +1,198 @@
+# Documentation site, built with Zensical: `uv run zensical build --strict`.
+# Preview locally with `uv run zensical serve`.
+
+[project]
+site_name = "RetrievalLoom"
+site_description = "Async-first, provider-agnostic, multi-channel retrieval and evidence orchestration engine for Python."
+site_url = "https://retrievalloom.readthedocs.io/en/latest/"
+site_author = "smuniharish"
+repo_name = "smuniharish/retrievalloom"
+repo_url = "https://github.com/smuniharish/retrievalloom"
+edit_uri = "edit/main/docs/"
+copyright = "Copyright &copy; RetrievalLoom contributors. Released under the Apache License 2.0."
+extra_css = ["stylesheets/extra.css"]
+
+nav = [
+  { "Home" = "index.md" },
+  { "Getting started" = [
+    "getting-started/index.md",
+    { "Installation" = "getting-started/installation.md" },
+    { "Quickstart" = "getting-started/quickstart.md" },
+    { "Configuration" = "getting-started/configuration.md" },
+  ] },
+  { "User guide" = [
+    "guide/index.md",
+    { "Concepts" = [
+      "guide/concepts/index.md",
+      { "Scopes and documents" = "guide/concepts/documents.md" },
+      { "Channels and methods" = "guide/concepts/channels.md" },
+      { "Retrieval pipeline" = "guide/concepts/retrieval.md" },
+      { "Evidence and provenance" = "guide/concepts/evidence.md" },
+      { "Generations and coverage" = "guide/concepts/lifecycle.md" },
+      { "Offloading and admission" = "guide/concepts/offloading.md" },
+    ] },
+    { "How-to guides" = [
+      "guide/how-to/index.md",
+      { "Bring your own embedding model" = "guide/how-to/embedding-model.md" },
+      { "Rerank and verify claims" = "guide/how-to/rerank-and-nli.md" },
+      { "Use durable storage" = "guide/how-to/durable-storage.md" },
+      { "Run several engines on one store" = "guide/how-to/multiple-engines.md" },
+      { "Filter and authorise" = "guide/how-to/filters-and-access.md" },
+      { "Backfill and rebuild indexes" = "guide/how-to/backfill-and-rebuild.md" },
+      { "Write a custom backend" = "guide/how-to/custom-backends.md" },
+      { "Keep the event loop responsive" = "guide/how-to/event-loop-latency.md" },
+    ] },
+    { "Troubleshooting" = "guide/troubleshooting.md" },
+  ] },
+  { "Integrations" = [
+    "integrations/index.md",
+    { "Qdrant" = "integrations/qdrant.md" },
+    { "resourcera" = "integrations/resourcera.md" },
+    { "refresh-engine" = "integrations/refresh-engine.md" },
+    { "agxai" = "integrations/agxai.md" },
+    { "LadybugDB and TreeSearch" = "integrations/graph-and-structure.md" },
+  ] },
+  { "Examples" = [
+    "examples/index.md",
+    { "Quickstart" = "examples/quickstart.md" },
+    { "Multi-tenant" = "examples/multi-tenant.md" },
+    { "Pre-chunked and multi-representation" = "examples/prechunked-and-multi-representation.md" },
+    { "Graph channel" = "examples/graph-channel.md" },
+    { "Structure channel" = "examples/structure-channel.md" },
+    { "Lifecycle: backfill and rebuild" = "examples/lifecycle-backfill-rebuild.md" },
+    { "agxai provenance" = "examples/agxai-provenance.md" },
+    { "Own embeddings on Qdrant" = "examples/byo-embeddings-qdrant.md" },
+    { "Custom reranker and NLI" = "examples/custom-reranker-nli.md" },
+  ] },
+  { "Architecture" = [
+    "architecture/index.md",
+    { "Engine and components" = "architecture/engine.md" },
+    { "Metadata store" = "architecture/storage.md" },
+    { "Index lifecycle" = "architecture/lifecycle.md" },
+    { "Retrieval execution" = "architecture/retrieval.md" },
+    { "Concurrency and isolation" = "architecture/concurrency.md" },
+  ] },
+  { "Security" = "security.md" },
+  { "Benchmarks" = "benchmarks.md" },
+  { "API reference" = [
+    "api/index.md",
+    { "Engine" = "api/engine.md" },
+    { "Configuration" = "api/config.md" },
+    { "Runtime" = "api/runtime.md" },
+    { "Inputs and filters" = "api/inputs.md" },
+    { "Results and evidence" = "api/results.md" },
+    { "Records and reports" = "api/records.md" },
+    { "Contracts" = "api/contracts.md" },
+    { "Built-in components" = "api/components.md" },
+    { "Storage" = "api/storage.md" },
+    { "Integrations" = "api/integrations.md" },
+    { "Errors" = "api/errors.md" },
+    { "Testing" = "api/testing.md" },
+  ] },
+  { "Project" = [
+    { "Changelog" = "changelog.md" },
+    { "Contributing" = "development/contributing.md" },
+    { "Testing" = "development/testing.md" },
+  ] },
+]
+
+# `zensical build --strict` fails on any of these.
+[project.validation]
+invalid_links = true
+invalid_link_anchors = true
+unresolved_references = true
+unresolved_footnotes = true
+unused_definitions = true
+unused_footnotes = true
+shadowed_definitions = true
+shadowed_footnotes = true
+
+[project.theme]
+font = false
+logo = "assets/logo.svg"
+favicon = "assets/logo.svg"
+icon.repo = "fontawesome/brands/github"
+features = [
+  "content.action.edit",
+  "content.code.annotate",
+  "content.code.copy",
+  "content.tabs.link",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.sections",
+  "navigation.tabs",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "search.share",
+  "search.suggest",
+  "toc.follow",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+primary = "indigo"
+accent = "indigo"
+toggle.icon = "material/weather-night"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+primary = "indigo"
+accent = "indigo"
+toggle.icon = "material/weather-sunny"
+toggle.name = "Switch to light mode"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/smuniharish/retrievalloom"
+name = "RetrievalLoom on GitHub"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/python"
+link = "https://pypi.org/project/retrievalloom/"
+name = "RetrievalLoom on PyPI"
+
+# Click an image to open it full size, with zoom.
+[project.plugins.glightbox]
+
+[project.plugins.mkdocstrings.handlers.python]
+paths = ["src"]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+docstring_style = "google"
+extensions = [{ griffe_pydantic = { schema = false } }]
+show_source = false
+show_root_heading = true
+show_root_full_path = false
+show_symbol_type_heading = true
+merge_init_into_class = true
+separate_signature = true
+show_signature_annotations = true
+signature_crossrefs = true
+members_order = "source"
+heading_level = 3
+
+[project.markdown_extensions]
+abbr = {}
+admonition = {}
+attr_list = {}
+def_list = {}
+footnotes = {}
+md_in_html = {}
+tables = {}
+toc.permalink = true
+pymdownx.betterem = {}
+pymdownx.details = {}
+pymdownx.emoji.emoji_index = "zensical.extensions.emoji.twemoji"
+pymdownx.emoji.emoji_generator = "zensical.extensions.emoji.to_svg"
+pymdownx.highlight.anchor_linenums = true
+pymdownx.inlinehilite = {}
+pymdownx.keys = {}
+pymdownx.snippets.base_path = ["."]
+pymdownx.snippets.check_paths = true
+pymdownx.superfences = {}
+pymdownx.tabbed.alternate_style = true

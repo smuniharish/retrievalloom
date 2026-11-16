@@ -228,6 +228,14 @@ def test_single_value_in_equals_eq(field: str, value: Any, record: dict[str, Any
     )
 
 
+@pytest.mark.parametrize("value", [False, True])
+def test_eq_matches_a_boolean_inside_a_list(value: bool) -> None:
+    record = {"f": [value, 0]}
+    assert evaluate(Eq(field="f", value=value), record)
+    assert not evaluate(Eq(field="f", value=not value), record)
+    assert not evaluate(Eq(field="f", value=int(value) or 2), record)
+
+
 @settings(max_examples=100)
 @given(st.integers(-10, 10), st.integers(-10, 10), st.integers(-10, 10))
 def test_numeric_range_matches_python_comparison(value: int, low: int, high: int) -> None:

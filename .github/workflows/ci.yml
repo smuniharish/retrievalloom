@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      live:
+        description: Also run the live suite against a Qdrant service container
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint and type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.14"
+          enable-cache: true
+      - run: uv sync --locked --all-extras --group dev
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pyrefly check
+
+  test:
+    name: Test on Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.12", "3.13", "3.14"]
+        include:
+          - os: windows-latest
+            python-version: "3.14"
+          - os: macos-latest
+            python-version: "3.14"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      - run: uv sync --locked --all-extras --group dev
+      # Offline run: no services, network, or model weights. Warnings are errors
+      # (pyproject.toml), and branch coverage must stay at 100%.
+      - run: uv run pytest -m "not live" --cov=retrievalloom --cov-branch --cov-report=term-missing
+
+  lowest:
+    name: Test with the lowest supported dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --resolution lowest-direct --all-extras --group dev
+      - run: uv run --no-sync pytest -m "not live"
+
+  canary:
+    name: Canary on Python 3.15 (allowed to fail)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.15"
+          enable-cache: true
+      # 3.15 is not supported yet; lift the upper bound for this job only to
+      # learn early which dependencies or behaviors break.
+      - run: sed -i 's/requires-python = ">=3.12,<3.15"/requires-python = ">=3.12"/' pyproject.toml
+      - run: uv sync --all-extras --group dev
+      - run: uv run --no-sync pytest -m "not live"
+
+  live:
+    name: Live suite (Qdrant service container)
+    if: github.event_name == 'workflow_dispatch' && inputs.live
+    runs-on: ubuntu-latest
+    services:
+      qdrant:
+        image: qdrant/qdrant:latest
+        ports:
+          - 6333:6333
+          - 6334:6334
+    env:
+      RL_TEST_QDRANT_URL: http://localhost:6333
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.14"
+          enable-cache: true
+      - run: uv sync --locked --all-extras --group dev
+      - name: Wait for Qdrant
+        run: |
+          for _ in $(seq 1 30); do
+            curl --silent --fail "$RL_TEST_QDRANT_URL/readyz" && exit 0
+            sleep 2
+          done
+          exit 1
+      # Model weights are not available in CI, so tests marked `models` skip.
+      - run: uv run pytest -m "live and not models" -rs
+
+  package:
+    name: Build and smoke-test the package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.14"
+          enable-cache: true
+      - run: uv build
+      - run: uvx twine check --strict dist/*
+      - name: Install the wheel into a clean environment and run the quickstart
+        run: |
+          uv venv --no-project "$RUNNER_TEMP/wheel"
+          uv pip install --python "$RUNNER_TEMP/wheel" dist/*.whl
+          "$RUNNER_TEMP/wheel/bin/python" -c "import importlib.util, retrievalloom; assert importlib.util.find_spec('langchain_core') is None; print(retrievalloom.__version__)"
+          "$RUNNER_TEMP/wheel/bin/python" examples/quickstart.py
+      - name: Install the optional extras
+        run: |
+          uv pip install --python "$RUNNER_TEMP/wheel" "dist/retrievalloom-$(uv version --short)-py3-none-any.whl[all]"
+          "$RUNNER_TEMP/wheel/bin/python" -c "import retrievalloom.graph, retrievalloom.structure"
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.14"
+          enable-cache: true
+      - run: uv sync --locked --group docs --all-extras
+      - run: uv run zensical build --strict
+      - run: uv run python scripts/check_site_links.py
