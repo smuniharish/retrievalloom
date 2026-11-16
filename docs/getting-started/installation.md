@@ -24,6 +24,16 @@ RetrievalLoom needs Python 3.12 or later. It is tested on 3.12, 3.13 and 3.14.
 | `testing` | The pytest [contract kits](../api/testing.md) for your own components | `pip install "retrievalloom[testing]"` |
 | `all` | `graph` and `structure` | `pip install "retrievalloom[all]"` |
 
+!!! warning "LadybugDB on Windows"
+
+    The Windows wheel of `ladybug` (0.22.3) does not bundle the OpenSSL DLLs its native
+    extension links against (`libssl-3-x64.dll`, `libcrypto-3-x64.dll`). It finds them
+    only when the interpreter's own `ssl` module has already loaded DLLs with those names,
+    which is the case for uv-managed Python builds (`uv python install`). On interpreters
+    that name them differently, including python.org-based builds, using the graph store
+    fails with `DLL load failed while importing _lbug`. Use a uv-managed Python, or put
+    OpenSSL 3 DLLs with those names on the DLL search path.
+
 ## What the base install includes
 
 The base package installs everything the default engine uses:

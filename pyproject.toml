@@ -205,6 +205,9 @@ ignore-missing-imports = [
 [tool.coverage.run]
 branch = true
 source = ["retrievalloom"]
+# SQLAlchemy's asyncio bridge runs sync hooks in greenlets; the pre-3.14 tracer
+# only follows them when told to.
+concurrency = ["thread", "greenlet"]
 
 [tool.coverage.report]
 fail_under = 100

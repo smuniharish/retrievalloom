@@ -14,6 +14,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # uv-managed CPython everywhere: on Windows, ladybug's native extension needs the
+  # OpenSSL DLL names those builds ship (docs/getting-started/installation.md).
+  UV_PYTHON_PREFERENCE: only-managed
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
