@@ -29,7 +29,10 @@ dictionary comes from a `KeywordDictionaryABC`. The default,
 `MetadataKeywordDictionary`, collects every string (or list of strings) stored
 under the `keywords` metadata field of the scope's active documents. Each term
 is compiled into an Aho-Corasick automaton (ahocorasick-rs). Chunks are scored
-by the sum of `log(1 + N/df)` over matched terms.
+by the sum of `log(1 + N/df)` over matched terms. A generation keeps the
+dictionary it was built with; when the dictionary changes (for example a newly
+ingested document adds keywords), the next lifecycle round builds a new
+keyword and fuzzy generation.
 
 Without dictionary entries, the keyword method returns nothing. To use other
 fields or fixed terms:
@@ -57,9 +60,13 @@ below `score_cutoff` (0 to 100) are ignored. Tune it in `FuzzyConfig`.
 
 ### Sparse
 
-`BM25sIndex` runs BM25 (bm25s, `lucene` variant, `k1=1.5`, `b=0.75`) over the
-tokens produced by the tokenizer. The default `SimpleTokenizer` folds case,
-applies NFC and splits on Unicode word runs.
+`BM25sIndex` scores BM25 with the bm25s formulas (`lucene` variant, `k1=1.5`,
+`b=0.75`) over the tokens produced by the tokenizer. The default
+`SimpleTokenizer` folds case, applies NFC and splits on Unicode word runs. The
+corpus statistics (chunk count, document frequencies, average length) are
+those of the generation's current chunks and are applied at query time, so
+scores equal those of a fresh bm25s index over the same chunks, however the
+generation was updated.
 
 ### Dense
 

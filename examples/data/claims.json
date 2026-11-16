@@ -1,0 +1,17 @@
+{
+  "sources": [
+    {"id": "proxy-article", "kind": "help-center", "text": "AcmeSync supports HTTP and SOCKS5 proxies but not PAC files. Configure the proxy under Preferences, Network."},
+    {"id": "forum-post", "kind": "community-forum", "text": "Forum answer from 2021: AcmeSync reads PAC files automatically, so you never need to configure a proxy by hand."},
+    {"id": "refund-article", "kind": "help-center", "text": "Card refunds reach the customer within five to ten business days after the refund is issued in AcmePay."},
+    {"id": "retention-policy", "kind": "policy", "text": "Deleted files remain in the AcmeSync trash for 30 days and are then permanently erased."},
+    {"id": "release-notes", "kind": "release-notes", "text": "Version 7.2 extends the AcmeSync trash retention for business plans from 30 to 90 days."},
+    {"id": "status-page", "kind": "status", "text": "AcmePay status report for March: there were no incidents and every AcmePay service stayed operational."}
+  ],
+  "claims": [
+    "AcmeSync supports PAC files for proxy configuration.",
+    "A card refund takes between five and ten business days.",
+    "Deleted files stay in the trash for 30 days.",
+    "AcmePay had incidents in March.",
+    "AcmeSync has a native client for Linux."
+  ]
+}

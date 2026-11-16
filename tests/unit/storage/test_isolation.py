@@ -45,20 +45,32 @@ CROSS_SCOPE: dict[str, Call] = {
     "get_document": lambda tx: tx.get_document(OTHER, "doc-1"),
     "get_documents_by_uid": lambda tx: tx.get_documents_by_uid(OTHER.key, [FOREIGN_UID]),
     "put_document": lambda tx: tx.put_document(document(OTHER, "d"), expected_revision=None),
+    "get_documents": lambda tx: tx.get_documents(OTHER, ["doc-1"]),
+    "put_documents": lambda tx: tx.put_documents([(document(OTHER, "d"), None)]),
     "list_documents": lambda tx: tx.list_documents(OTHER.key),
+    "list_document_metadata": lambda tx: tx.list_document_metadata(OTHER.key),
     "count_documents": lambda tx: tx.count_documents(OTHER.key),
     "put_version": lambda tx: tx.put_version(OTHER.key, version(OTHER, "d", 1)),
+    "put_versions": lambda tx: tx.put_versions(OTHER.key, [version(OTHER, "d", 1)]),
     "put_representations": lambda tx: tx.put_representations(
         OTHER.key, [snapshot(OTHER, "d", 1, "t")]
     ),
     "get_event": lambda tx: tx.get_event(OTHER.key, "e"),
     "put_event": lambda tx: tx.put_event(event(OTHER, "e")),
+    "get_events": lambda tx: tx.get_events(OTHER.key, ["e"]),
+    "put_events": lambda tx: tx.put_events([event(OTHER, "e")]),
+    "find_events_by_fingerprints": lambda tx: tx.find_events_by_fingerprints(
+        OTHER.key, {"fp": "e"}, since=NOW
+    ),
     "find_event_by_fingerprint": lambda tx: tx.find_event_by_fingerprint(
         OTHER.key, "fp", since=NOW, exclude_event_id="e"
     ),
     "put_objects": lambda tx: tx.put_objects([obj(OTHER, "o")]),
     "get_objects": lambda tx: tx.get_objects(OTHER.key, ["o"]),
     "list_document_objects": lambda tx: tx.list_document_objects(OTHER.key, FOREIGN_UID),
+    "list_objects_for_documents": lambda tx: tx.list_objects_for_documents(
+        OTHER.key, [(FOREIGN_UID, None)]
+    ),
     "list_current_objects": lambda tx: tx.list_current_objects(OTHER.key, [ObjectKind.CHUNK]),
     "set_document_objects_state": lambda tx: tx.set_document_objects_state(
         OTHER.key, FOREIGN_UID, ObjectState.LIVE
@@ -73,6 +85,7 @@ CROSS_SCOPE: dict[str, Call] = {
     ),
     "get_lineage": lambda tx: tx.get_lineage(OTHER.key, "a"),
     "open_visibility": lambda tx: tx.open_visibility(FOREIGN_UNIT, FOREIGN_UID, 1, 1),
+    "open_visibility_many": lambda tx: tx.open_visibility_many(FOREIGN_UNIT, [(FOREIGN_UID, 1)], 1),
     "close_visibility": lambda tx: tx.close_visibility(OTHER.key, FOREIGN_UID, 1),
     "visible_versions": lambda tx: tx.visible_versions(FOREIGN_UNIT, [FOREIGN_UID], 1),
     "upsert_coverage": lambda tx: tx.upsert_coverage([coverage(OTHER, "doc-1")]),
@@ -82,6 +95,9 @@ CROSS_SCOPE: dict[str, Call] = {
     "coverage_counts": lambda tx: tx.coverage_counts(OTHER.key, [""]),
     "set_document_coverage_state": lambda tx: tx.set_document_coverage_state(
         OTHER.key, FOREIGN_UID, CoverageState.STALE, target_version=1
+    ),
+    "set_documents_coverage_state": lambda tx: tx.set_documents_coverage_state(
+        OTHER.key, {FOREIGN_UID: 1}, CoverageState.STALE
     ),
     "put_generation": lambda tx: tx.put_generation(generation(OTHER), expected_revision=None),
     "list_generations": lambda tx: tx.list_generations(scope_key=OTHER.key),
@@ -149,9 +165,12 @@ WRITES: dict[str, Call] = {
     "next_commit_seq": lambda tx: tx.next_commit_seq(),
     "put_document": lambda tx: tx.put_document(document(SCOPE, "d"), expected_revision=None),
     "put_document_cas": lambda tx: tx.put_document(document(SCOPE, "d"), expected_revision=1),
+    "put_documents": lambda tx: tx.put_documents([]),
     "put_version": lambda tx: tx.put_version(SCOPE.key, version(SCOPE, "d", 1)),
+    "put_versions": lambda tx: tx.put_versions(SCOPE.key, []),
     "put_representations": lambda tx: tx.put_representations(SCOPE.key, []),
     "put_event": lambda tx: tx.put_event(event(SCOPE, "e")),
+    "put_events": lambda tx: tx.put_events([]),
     "put_objects": lambda tx: tx.put_objects([]),
     "set_document_objects_state": lambda tx: tx.set_document_objects_state(
         SCOPE.key, SCOPE_UID, ObjectState.LIVE
@@ -159,10 +178,14 @@ WRITES: dict[str, Call] = {
     "replace_contributions": lambda tx: tx.replace_contributions(SCOPE.key, SCOPE_UID, []),
     "put_lineage": lambda tx: tx.put_lineage([]),
     "open_visibility": lambda tx: tx.open_visibility(UNIT, SCOPE_UID, 1, 1),
+    "open_visibility_many": lambda tx: tx.open_visibility_many(UNIT, [], 1),
     "close_visibility": lambda tx: tx.close_visibility(SCOPE.key, SCOPE_UID, 1),
     "upsert_coverage": lambda tx: tx.upsert_coverage([]),
     "set_document_coverage_state": lambda tx: tx.set_document_coverage_state(
         SCOPE.key, SCOPE_UID, CoverageState.STALE, target_version=1
+    ),
+    "set_documents_coverage_state": lambda tx: tx.set_documents_coverage_state(
+        SCOPE.key, {}, CoverageState.STALE
     ),
     "put_generation": lambda tx: tx.put_generation(generation(SCOPE), expected_revision=None),
     "set_pointer": lambda tx: tx.set_pointer(UNIT, "g", expected_revision=None),

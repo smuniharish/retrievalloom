@@ -105,7 +105,10 @@ that point at a superseded version are dropped (`allow_stale_versions=False`).
 
 `delete(document_ids, scope=...)` marks documents deleted and removes their
 objects from every index. The `DeleteReport` lists `deleted`,
-`already_deleted` and `not_found` ids.
+`already_deleted` and `not_found` ids. The document stays in the metadata
+store as a tombstone until `purge(document_ids, scope=...)` erases it, or until
+maintenance erases it after `LifecycleConfig.purge_after`. See
+[Deletion, erasure and retention](lifecycle.md#deletion-erasure-and-retention).
 
 ## Reserved filter fields
 

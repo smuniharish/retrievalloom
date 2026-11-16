@@ -24,6 +24,15 @@ if TYPE_CHECKING:
 DOCUMENT_KINDS = (ObjectKind.CHUNK,)
 STRUCTURE_KINDS = (ObjectKind.STRUCTURE_NODE,)
 GRAPH_KINDS = (ObjectKind.GRAPH_ENTITY, ObjectKind.GRAPH_RELATIONSHIP)
+DICTIONARY_DIGEST = "keyword_entries_digest"
+"""Generation stats key holding :func:`dictionary_digest` of the generation's spec."""
+
+
+def dictionary_digest(spec: GenerationSpec) -> str | None:
+    """Digest of the keyword dictionary a generation is built with; ``None`` without one."""
+    if not spec.keyword_entries:
+        return None
+    return digest_json([entry.model_dump(mode="json") for entry in spec.keyword_entries])
 
 
 @dataclass(frozen=True, slots=True)

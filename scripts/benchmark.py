@@ -14,6 +14,9 @@ model or disk time is included:
 - **retrieve, concurrent**: ``--queries`` retrievals with ``--concurrency`` in flight.
   A ticker measures how late the event loop wakes it up while they run (loop lag).
 
+``--max-cpu-jobs`` sets ``OffloaderConfig.max_cpu_jobs``. ``--gc-freeze`` calls
+``gc.collect()`` and ``gc.freeze()`` right before the concurrent scenario.
+
 The corpus and queries are generated from a fixed seed, so runs are repeatable.
 Numbers are machine-dependent; compare them on the same machine.
 
@@ -50,6 +53,7 @@ from retrievalloom import (
     create_retrieval_engine,
 )
 from retrievalloom.infra import InMemoryLRUCache
+from retrievalloom.runtime.offloader import OffloaderConfig
 
 SEED = 20240611
 VOCABULARY_SIZE = 3000
@@ -202,14 +206,23 @@ async def _concurrent(
 
 
 async def run(
-    *, documents: int, queries: int, batch: int, concurrency: int, warmup: int = 20
+    *,
+    documents: int,
+    queries: int,
+    batch: int,
+    concurrency: int,
+    warmup: int = 20,
+    max_cpu_jobs: int | None = None,
+    gc_freeze: bool = False,
 ) -> Results:
     """Run every scenario and return the measurements."""
     inputs, texts = corpus(documents, queries)
     warm = texts[:warmup]
     cache = _SwitchableCache(max_entries=queries * 2)
     engine = create_retrieval_engine(
-        lifecycle=LifecycleConfig(background=False), components=Components(cache=cache)
+        lifecycle=LifecycleConfig(background=False),
+        components=Components(cache=cache),
+        offloader=OffloaderConfig(max_cpu_jobs=max_cpu_jobs),
     )
     async with engine:
         ingest_seconds = await _ingest(engine, inputs, batch)
@@ -221,6 +234,9 @@ async def run(
         await _sequential(engine, texts)
         cached = Latency.of((await _sequential(engine, texts))[0])
         cache.enabled = False
+        if gc_freeze:
+            gc.collect()
+            gc.freeze()
         concurrent_seconds, lag = await _concurrent(engine, texts, concurrency)
     return Results(
         documents=documents,
@@ -286,6 +302,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--batch", type=int, default=500)
     parser.add_argument("--concurrency", type=int, default=16)
     parser.add_argument("--warmup", type=int, default=20)
+    parser.add_argument("--max-cpu-jobs", type=int, default=None)
+    parser.add_argument("--gc-freeze", action="store_true")
     args = parser.parse_args(argv)
     structlog.configure(
         wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING),
@@ -299,6 +317,8 @@ def main(argv: list[str] | None = None) -> None:
             batch=args.batch,
             concurrency=args.concurrency,
             warmup=args.warmup,
+            max_cpu_jobs=args.max_cpu_jobs,
+            gc_freeze=args.gc_freeze,
         )
     )
     print(report(results))

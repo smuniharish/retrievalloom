@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from retrievalloom.index.fuzzy import RapidFuzzIndex, _FuzzyStructure
+from retrievalloom.index.fuzzy import RapidFuzzIndex
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -65,11 +65,10 @@ async def test_fuzzy_matching_releases_the_gil() -> None:
     vocabulary: list[str] = sorted(
         {"".join(rng.choices(letters, k=rng.randint(4, 10))) for _ in range(200_000)}
     )
-    structure = _FuzzyStructure(vocabulary=vocabulary, postings={})
     grams = ["kubernetes", "asyncio", "retrieval", "kubernetes asyncio"]
     index = RapidFuzzIndex()
     started = time.perf_counter()
-    lag = await max_loop_lag_ms(asyncio.to_thread(index._match_sync, structure, grams))
+    lag = await max_loop_lag_ms(asyncio.to_thread(index._match_sync, vocabulary, grams))
     elapsed_ms = (time.perf_counter() - started) * 1000
     # Scoring one gram against this vocabulary takes ~200 ms of C code; holding the GIL
     # for it (as process.extract does) would stall the loop for that long.

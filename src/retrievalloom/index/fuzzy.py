@@ -1,8 +1,9 @@
-"""Fuzzy vocabulary index built on RapidFuzz (in memory, immutable)."""
+"""Fuzzy vocabulary index built on RapidFuzz (in memory, updated in place)."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import sys
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -39,10 +40,50 @@ _MATCHES_PER_NGRAM = 5
 _SCORER: Any = fuzz.WRatio
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(slots=True)
 class _FuzzyStructure:
-    vocabulary: list[str]
-    postings: dict[str, frozenset[str]]
+    """Vocabulary postings of the live objects and a lazily refreshed sorted vocabulary."""
+
+    matcher: PhraseMatcher
+    postings: dict[str, set[str]] = field(default_factory=dict)
+    forward: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    vocabulary: list[str] = field(default_factory=list)
+    added: set[str] = field(default_factory=set)
+    removed: set[str] = field(default_factory=set)
+
+    def sorted_vocabulary(self) -> list[str]:
+        """The sorted vocabulary; a new list after changes, so readers keep a stable one."""
+        if self.added or self.removed:
+            kept = [term for term in self.vocabulary if term not in self.removed]
+            # Both runs are sorted, so Timsort merges them in linear time.
+            self.vocabulary = sorted(kept + sorted(self.added))
+            self.added = set()
+            self.removed = set()
+        return self.vocabulary
+
+    def post(self, term: str, object_id: str) -> None:
+        """Post ``object_id`` under ``term``."""
+        bucket = self.postings.get(term)
+        if bucket is not None:
+            bucket.add(object_id)
+            return
+        self.postings[term] = {object_id}
+        if term in self.removed:
+            self.removed.discard(term)
+        else:
+            self.added.add(term)
+
+    def unpost(self, term: str, object_id: str) -> None:
+        """Remove ``object_id`` from ``term``'s posting."""
+        bucket = self.postings[term]
+        bucket.discard(object_id)
+        if bucket:
+            return
+        del self.postings[term]
+        if term in self.added:
+            self.added.discard(term)
+        else:
+            self.removed.add(term)
 
 
 class RapidFuzzIndex(FuzzyIndexABC, InMemoryGenerationalIndex):
@@ -50,10 +91,12 @@ class RapidFuzzIndex(FuzzyIndexABC, InMemoryGenerationalIndex):
 
     The vocabulary holds the generation's dictionary surface forms (posted to objects
     that contain them, word-bounded) and, when ``corpus_vocabulary`` is set, corpus
-    tokens of at least ``min_token_length`` characters. Query n-grams (1..``max_ngram``
-    tokens) are scored with ``rapidfuzz.process.cdist`` (``WRatio``, GIL released) and
-    the best five vocabulary terms per n-gram are kept; an object's score
-    is the sum over matched vocabulary terms of the best similarity / 100.
+    tokens of at least ``min_token_length`` characters. Writes and removals update the
+    postings in place; the sorted vocabulary is refreshed on the next search. Query
+    n-grams (1..``max_ngram`` tokens) are scored with ``rapidfuzz.process.cdist``
+    (``WRatio``, GIL released) and the best five vocabulary terms per n-gram are kept;
+    an object's score is the sum over matched vocabulary terms of the best
+    similarity / 100.
 
     Args:
         score_cutoff: Minimum similarity (0-100).
@@ -61,6 +104,8 @@ class RapidFuzzIndex(FuzzyIndexABC, InMemoryGenerationalIndex):
         corpus_vocabulary: Add corpus tokens to the vocabulary.
         min_token_length: Shortest token or n-gram considered.
     """
+
+    workload = WorkloadKind.KEYWORD_BUILD
 
     def __init__(
         self,
@@ -97,31 +142,44 @@ class RapidFuzzIndex(FuzzyIndexABC, InMemoryGenerationalIndex):
         """Component identity."""
         return self._info
 
-    def _build_sync(self, spec: GenerationSpec, items: list[IndexItem]) -> _FuzzyStructure:
-        postings: dict[str, set[str]] = {}
+    def _empty(self, spec: GenerationSpec) -> _FuzzyStructure:
         phrases = {
             surface: fold(surface)
             for entry in spec.keyword_entries
             for surface in entry.surface_forms
         }
-        matcher = PhraseMatcher(phrases)
-        for item in items:
-            for _canonical, surface, _start, _end in matcher.find(item.text):
-                postings.setdefault(surface, set()).add(item.object_id)
-            if self._corpus:
-                for token in item.tokens or ():
-                    if len(token) >= self._min_length:
-                        postings.setdefault(token, set()).add(item.object_id)
-        vocabulary = sorted(postings)
-        return _FuzzyStructure(
-            vocabulary=vocabulary,
-            postings={term: frozenset(ids) for term, ids in postings.items()},
-        )
+        return _FuzzyStructure(matcher=PhraseMatcher(phrases))
 
-    async def _build(self, scope: Scope, spec: GenerationSpec, items: list[IndexItem]) -> Any:
-        return await self.offloader.run(
-            WorkloadKind.KEYWORD_BUILD, self._build_sync, spec, items, tenant=scope.tenant_id
-        )
+    def _build(self, spec: GenerationSpec, items: list[IndexItem]) -> _FuzzyStructure:
+        structure = super()._build(spec, items)
+        structure.sorted_vocabulary()  # sort the full vocabulary here, not on the event loop
+        return structure
+
+    def _analyze(
+        self, structure: _FuzzyStructure, items: list[IndexItem]
+    ) -> list[tuple[str, tuple[str, ...]]]:
+        analysis: list[tuple[str, tuple[str, ...]]] = []
+        for item in items:
+            terms = [surface for _canonical, surface, _s, _e in structure.matcher.find(item.text)]
+            if self._corpus:
+                terms.extend(token for token in item.tokens or () if len(token) >= self._min_length)
+            analysis.append(
+                (item.object_id, tuple(sys.intern(term) for term in dict.fromkeys(terms)))
+            )
+        return analysis
+
+    def _insert(
+        self, structure: _FuzzyStructure, analysis: list[tuple[str, tuple[str, ...]]]
+    ) -> None:
+        for object_id, terms in analysis:
+            structure.forward[object_id] = terms
+            for term in terms:
+                structure.post(term, object_id)
+
+    def _delete(self, structure: _FuzzyStructure, object_ids: list[str]) -> None:
+        for object_id in object_ids:
+            for term in structure.forward.pop(object_id):
+                structure.unpost(term, object_id)
 
     def _ngrams(self, tokens: Sequence[str]) -> list[str]:
         grams: list[str] = []
@@ -132,12 +190,12 @@ class RapidFuzzIndex(FuzzyIndexABC, InMemoryGenerationalIndex):
                     grams.append(gram)
         return grams
 
-    def _match_sync(self, structure: _FuzzyStructure, grams: list[str]) -> dict[str, tuple]:
+    def _match_sync(self, vocabulary: list[str], grams: list[str]) -> dict[str, tuple]:
         # cdist releases the GIL while scoring (process.extract does not), so the
         # offloaded match cannot stall the application's event loop.
         matrix = process.cdist(
             grams,
-            structure.vocabulary,
+            vocabulary,
             scorer=_SCORER,
             score_cutoff=self._cutoff,
             dtype=np.float64,
@@ -148,7 +206,7 @@ class RapidFuzzIndex(FuzzyIndexABC, InMemoryGenerationalIndex):
             candidates = np.flatnonzero(row >= self._cutoff).tolist()
             candidates.sort(key=lambda index: (-row[index], index))
             for index in candidates[:_MATCHES_PER_NGRAM]:
-                term, similarity = structure.vocabulary[index], float(row[index])
+                term, similarity = vocabulary[index], float(row[index])
                 if term not in best or similarity > best[term][0]:
                     best[term] = (similarity, gram)
         return best
@@ -165,19 +223,19 @@ class RapidFuzzIndex(FuzzyIndexABC, InMemoryGenerationalIndex):
         generation = self.sealed_generation(scope, generation_id)
         structure: _FuzzyStructure = generation.built
         grams = self._ngrams([fold(token) for token in query.tokens])
-        if not grams or not structure.vocabulary:
+        vocabulary = structure.sorted_vocabulary()
+        if not grams or not vocabulary:
             return []
         best = await self.offloader.run(
-            WorkloadKind.FUZZY_MATCH, self._match_sync, structure, grams, tenant=scope.tenant_id
+            WorkloadKind.FUZZY_MATCH, self._match_sync, vocabulary, grams, tenant=scope.tenant_id
         )
         scores: dict[str, float] = {}
         details: dict[str, list[MatchDetail]] = {}
         for term, (similarity, gram) in sorted(best.items()):
             detail = MatchDetail(kind="fuzzy", term=gram, matched=term, score=similarity)
-            for object_id in structure.postings[term]:
-                if object_id in generation.tombstones or not evaluate(
-                    filters, generation.metadata.get(object_id, {})
-                ):
+            # A term removed while matching ran has no posting any more.
+            for object_id in structure.postings.get(term, ()):
+                if not evaluate(filters, generation.metadata.get(object_id, {})):
                     continue
                 scores[object_id] = scores.get(object_id, 0.0) + similarity / 100.0
                 details.setdefault(object_id, []).append(detail)

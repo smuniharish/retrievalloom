@@ -11,6 +11,8 @@ Reports returned by the engine and the lifecycle records behind
 
 ::: retrievalloom.domain.reports.DeleteReport
 
+::: retrievalloom.domain.reports.PurgeReport
+
 ::: retrievalloom.domain.reports.LifecycleTaskRef
 
 ::: retrievalloom.domain.reports.LifecycleTaskResult

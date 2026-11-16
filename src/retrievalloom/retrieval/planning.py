@@ -207,13 +207,16 @@ def resolve_plan(
 
     reranking = config.reranking.enabled if execution.reranking is None else execution.reranking
     if reranking and not has_reranker:
-        planner.warnings.append(
-            RetrievalWarning(
-                code=WarningCode.RERANKER_UNAVAILABLE,
-                severity=Severity.WARNING if execution.reranking else Severity.INFO,
-                message="no reranker is configured",
+        # Configured reranking without a reranker is a silent no-op; only an explicit
+        # per-request demand reports the missing component.
+        if execution.reranking:
+            planner.warnings.append(
+                RetrievalWarning(
+                    code=WarningCode.RERANKER_UNAVAILABLE,
+                    severity=Severity.WARNING,
+                    message="no reranker is configured",
+                )
             )
-        )
         reranking = False
     nli = config.nli.enabled if execution.nli is None else execution.nli
     if nli and not has_nli:

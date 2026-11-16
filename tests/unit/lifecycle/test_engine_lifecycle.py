@@ -7,8 +7,11 @@ from typing import TYPE_CHECKING
 from retrievalloom import (
     DocumentInput,
     LifecycleConfig,
+    PurgeReport,
+    ResultStatus,
     Scope,
     TextRepresentation,
+    WarningCode,
     create_retrieval_engine,
 )
 from retrievalloom.config import EngineResources
@@ -56,4 +59,41 @@ async def test_ingest_delete_and_tasks_survive_a_restart(tmp_path: Path) -> None
         assert rebuild.state == TaskState.SUCCEEDED
         assert rebuild.error is None
         result = await second.retrieve("asyncio event loops", scope=SCOPE)
+        assert {s.document_id for e in result.evidence for s in e.sources} == {"d1"}
+
+
+async def test_purge_erases_documents_through_the_engine(tmp_path: Path) -> None:
+    async with engine(tmp_path) as opened:
+        await opened.ingest(
+            [doc("d1", "asyncio event loops"), doc("d2", "asyncio tasks")], scope=SCOPE
+        )
+        report = await opened.purge(["d1", "nope"], scope=SCOPE)
+        assert isinstance(report, PurgeReport)
+        assert report.purged == ("d1",)
+        assert report.not_found == ("nope",)
+        status = await opened.status(scope=SCOPE)
+        assert status.documents_active == 1
+        assert status.documents_deleted == 0
+        result = await opened.retrieve("asyncio event loops", scope=SCOPE)
+        assert {s.document_id for e in result.evidence for s in e.sources} == {"d2"}
+
+
+async def test_wait_for_rebuild_serves_complete_results_right_after_a_restart(
+    tmp_path: Path,
+) -> None:
+    lifecycle = LifecycleConfig(background=True, wait_for_rebuild=True, poll_interval=60)
+
+    def background_engine() -> RetrievalEngine:
+        return create_retrieval_engine(
+            lifecycle=lifecycle,
+            resources=EngineResources(resource_manager=shared_manager(), data_dir=tmp_path),
+        )
+
+    async with background_engine() as first:
+        await first.ingest([doc("d1", "asyncio event loops")], scope=SCOPE)
+        await first.wait_for(await first.backfill(scope=SCOPE), timeout=30)
+    async with background_engine() as second:
+        result = await second.retrieve("asyncio event loops", scope=SCOPE)
+        assert result.status == ResultStatus.COMPLETE
+        assert not [w for w in result.warnings if w.code == WarningCode.INDEX_MISSING]
         assert {s.document_id for e in result.evidence for s in e.sources} == {"d1"}

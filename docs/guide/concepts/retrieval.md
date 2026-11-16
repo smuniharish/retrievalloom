@@ -57,10 +57,14 @@ or `Components.channel_fusion`.
 
 ## Reranking and NLI
 
-Reranking is enabled in the configuration (`RerankingConfig.enabled=True`) but
-no reranker is wired by default. Without one, results carry a
-`reranker_unavailable` warning with `info` severity. Without reranking, the
-final score is the channel-fusion score.
+Reranking is enabled by default (`RerankingConfig.enabled=True`) and uses the
+built-in FlashRank reranker when its model files are in
+`RerankingConfig.model_dir`; pass `Components(reranker=...)` to use your own.
+Models are never downloaded implicitly. Without a model the default reranker is
+dropped at startup and the stage is skipped silently; only a request that
+explicitly asks for it with `RetrievalExecutionConfig(reranking=True)` gets a
+`reranker_unavailable` warning. Fusion (RRF by default) needs no model, and
+without reranking the final score is the channel-fusion score.
 
 NLI is disabled by default. When enabled and a model is configured, each of the
 top `nli_k` candidates is judged against the query and against every claim

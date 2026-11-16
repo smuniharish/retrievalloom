@@ -74,8 +74,8 @@ The keyword method found nothing here. It matches the keywords stored under the
 ## Warnings and status
 
 `result.warnings` explains anything the engine could not do. In this run it
-holds two informational warnings: `method_unavailable` (no embedding model, so
-no dense method) and `reranker_unavailable` (no reranker). Informational
+holds one informational warning: `method_unavailable` (no embedding model, so
+no dense method). Informational
 warnings keep `status` at `complete`. A warning of severity `warning` or higher
 makes the status `partial`. No evidence makes it `empty`.
 

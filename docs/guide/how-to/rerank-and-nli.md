@@ -5,19 +5,50 @@ are optional components.
 
 | Stage | Component | Enabled by default | Applies to |
 | --- | --- | --- | --- |
-| Rerank | `Components(reranker=...)` | Yes (`RerankingConfig.enabled`) | Top `rerank_k` (50) candidates with text |
+| Rerank | Built-in FlashRank, or `Components(reranker=...)` | Yes (`RerankingConfig.enabled`), when the model files are present | Top `rerank_k` (50) candidates with text |
 | NLI | `Components(nli=...)` | No (`NLIConfig.enabled`) | Top `nli_k` (10) candidates with text |
 
-When a stage is enabled but no component is configured, the stage is skipped.
-Reranking adds a `reranker_unavailable` warning and NLI a `stage_skipped`
-warning. The severity is `info` when the stage was enabled by configuration and
-`warning` when the request asked for it with `RetrievalExecutionConfig`.
+Reranking only reorders the fused list. Fusion (RRF by default) needs no model,
+so retrieval works with or without a reranker; without one the final score is
+the channel-fusion score.
 
-## FlashRank
+When a stage is enabled but no component is available, the stage is skipped.
+Configured reranking without a reranker is skipped silently; a request that
+asks for it explicitly with `RetrievalExecutionConfig(reranking=True)` gets a
+`reranker_unavailable` warning. NLI adds a `stage_skipped` warning, with
+severity `info` when it was enabled by configuration and `warning` when the
+request asked for it.
+
+## FlashRank (default)
 
 `FlashRankReranker` is the built-in reranker. It runs a FlashRank pairwise
 cross-encoder on ONNX Runtime through the offloader (`WorkloadKind.RERANK`).
-It is not wired by default: pass it explicitly.
+When `Components.reranker` is not set and `RerankingConfig.enabled` is true,
+the engine wires it automatically from `RerankingConfig`:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `model_dir` | `<data_dir>/models`, or `~/.cache/retrievalloom/models` without a `data_dir` | Directory holding `<model_name>/<model file>` |
+| `model_name` | `ms-marco-TinyBERT-L-2-v2` | A FlashRank pairwise model. Listwise models raise `ConfigurationError`. |
+| `allow_download` | `False` | Let FlashRank download a missing model from Hugging Face |
+
+```python
+from pathlib import Path
+
+from retrievalloom import RerankingConfig, RetrievalConfig, create_retrieval_engine
+
+engine = create_retrieval_engine(
+    retrieval=RetrievalConfig(reranking=RerankingConfig(model_dir=Path("models/flashrank")))
+)
+```
+
+The engine never downloads the model by default. If the model file is missing,
+the default reranker logs `reranker_unavailable` once at startup and is dropped:
+requests keep the fused order, with no per-request warning, and engine health
+does not list it. Set `RerankingConfig(enabled=False)` to turn reranking off.
+
+To override the default, pass any `RerankerABC` as `Components(reranker=...)`.
+You can also construct `FlashRankReranker` yourself:
 
 ```python
 from retrievalloom import Components
@@ -29,7 +60,7 @@ components = Components(reranker=FlashRankReranker("models/flashrank"))
 | Argument | Default | Meaning |
 | --- | --- | --- |
 | `cache_dir` | required | Directory holding `<model_name>/<model file>` |
-| `model_name` | `ms-marco-TinyBERT-L-2-v2` | A FlashRank pairwise model. Listwise models raise `ConfigurationError`. |
+| `model_name` | `ms-marco-TinyBERT-L-2-v2` | A FlashRank pairwise model |
 | `max_length` | 512 | Token limit per (query, passage) pair |
 | `batch_size` | 32 | Pairs per ONNX call |
 | `allow_download` | `False` | Let FlashRank download a missing model from Hugging Face |
@@ -38,9 +69,9 @@ FlashRank's bundled models are CC-BY-SA licensed.
 
 ### Provision the model files
 
-By default the reranker never downloads. If the model file is missing,
-`initialize` logs `reranker_unavailable`, `health()` reports the reranker
-unhealthy, and every request degrades with a `reranker_unavailable` warning.
+A reranker you supply yourself is kept even when its model is missing:
+`initialize` logs `reranker_unavailable`, `health()` reports it unhealthy, and
+every request degrades with a `reranker_unavailable` warning.
 
 The expected file is `FlashRankReranker(...).model_path`:
 
@@ -236,5 +267,5 @@ a warning and the request continues without that stage. A reranker that raises
 `BackendUnavailableError` produces `reranker_unavailable`; other errors produce
 `stage_failed_degraded`. With `fail`, the error propagates.
 
-The [custom reranker and NLI example](../../examples/custom-reranker-nli.md)
+The [fact checking example](../../examples/fact-checking.md)
 runs real cross-encoder and NLI models from a local directory.

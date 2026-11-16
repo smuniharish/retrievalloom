@@ -9,9 +9,9 @@ The engine uses its default components: an in-memory SQLite metadata store and t
 keyword, fuzzy and sparse (BM25) methods of the index channel. The keyword method reads
 canonical keywords from each document's `keywords` metadata field.
 
-Because no embedding model or reranker is configured, every result carries two
-informational warnings: `method_unavailable` (the dense method is skipped) and
-`reranker_unavailable`. Scores are reciprocal-rank-fusion scores, not probabilities.
+Because no embedding model is configured, every result carries the informational
+warning `method_unavailable` (the dense method is skipped). Without a reranker the
+rerank stage is skipped silently. Scores are reciprocal-rank-fusion scores, not probabilities.
 
 ## Requirements
 
@@ -36,7 +36,7 @@ python examples/quickstart.py
 ```text
 ingested: {'created': 4}
 status: complete
-warnings: ['method_unavailable', 'reranker_unavailable']
+warnings: ['method_unavailable']
 #1 asyncio v1 score=0.0164
    text:    Python's asyncio library runs coroutines on a single-threaded event loop.
    source:  kb://articles/asyncio (Asyncio)

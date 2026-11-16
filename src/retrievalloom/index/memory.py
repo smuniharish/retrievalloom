@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from abc import abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from retrievalloom.contracts.indexes import (
     GenerationalIndexABC,
@@ -22,28 +23,36 @@ if TYPE_CHECKING:
     from retrievalloom.contracts.component import ComponentContext
     from retrievalloom.domain.base import Metadata
     from retrievalloom.domain.inputs import Scope
-    from retrievalloom.runtime.offloader import Offloader
+    from retrievalloom.runtime.offloader import Offloader, WorkloadKind
 
 
 @dataclass(slots=True)
 class MemoryGeneration:
-    """One in-memory generation: staged items before sealing, built structure after."""
+    """One in-memory generation: staged items before sealing, a mutable structure after."""
 
     spec: GenerationSpec
-    items: dict[str, IndexItem] = field(default_factory=dict)
+    staged: dict[str, IndexItem] = field(default_factory=dict)
     metadata: dict[str, Metadata] = field(default_factory=dict)
-    tombstones: set[str] = field(default_factory=set)
     sealed: bool = False
     built: Any = None
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class InMemoryGenerationalIndex(GenerationalIndexABC):
-    """Immutable-after-seal in-memory index base.
+    """In-memory index base whose sealed generations are updated in place.
 
-    Writes are staged until ``seal`` builds the search structure in the offloader.
-    ``remove`` after sealing records a tombstone that masks the object at query time.
-    Generations are physically separate per ``(scope_key, generation_id)``.
+    Writes before ``seal`` are staged and built in one offloaded pass. After ``seal`` a
+    write is analysed in the offloader (:meth:`_analyze`, which may only read the parts
+    of the structure that never change) and applied on the event loop (:meth:`_delete`
+    of the objects it replaces, then :meth:`_insert`); ``remove`` deletes objects from
+    the structure. Both cost time proportional to the changed objects, not to the
+    generation, and leave the structure equal to a fresh build of the live objects.
+    Changes of one generation are serialised by its lock; :meth:`_maintain` may then
+    swap in a reorganised structure (e.g. compacted). Generations are physically
+    separate per ``(scope_key, generation_id)``.
     """
+
+    workload: ClassVar[WorkloadKind]
 
     def __init__(self) -> None:
         self._generations: dict[tuple[str, str], MemoryGeneration] = {}
@@ -51,8 +60,8 @@ class InMemoryGenerationalIndex(GenerationalIndexABC):
 
     @property
     def capabilities(self) -> IndexCapabilities:
-        """Immutable, ephemeral, filters evaluated in the backend."""
-        return IndexCapabilities(mutable_in_place=False, durable=False, filter_pushdown=True)
+        """Mutable in place, ephemeral, filters evaluated in the backend."""
+        return IndexCapabilities(mutable_in_place=True, durable=False, filter_pushdown=True)
 
     async def initialize(self, context: ComponentContext) -> None:
         """Bind the engine offloader."""
@@ -83,31 +92,44 @@ class InMemoryGenerationalIndex(GenerationalIndexABC):
     async def write(
         self, scope: Scope, generation_id: str, items: Sequence[IndexItem]
     ) -> WriteReport:
-        """Stage items; sealed generations reject writes."""
+        """Stage items before ``seal``; insert or replace them in place after it."""
         generation = self.generation(scope, generation_id)
-        if generation.sealed:
-            raise GenerationError("generation is sealed", details={"generation_id": generation_id})
-        for item in items:
-            generation.items[item.object_id] = item
-            generation.metadata[item.object_id] = dict(item.metadata)
-            generation.tombstones.discard(item.object_id)
+        batch = {item.object_id: item for item in items}
+        async with generation.lock:
+            if generation.sealed:
+                analysis = await self.offloader.run(
+                    self.workload,
+                    self._analyze,
+                    generation.built,
+                    list(batch.values()),
+                    tenant=scope.tenant_id,
+                )
+                # Applied without awaiting, so searches never see a half-applied write.
+                replaced = [oid for oid in batch if oid in generation.metadata]
+                self._delete(generation.built, replaced)
+                self._insert(generation.built, analysis)
+            else:
+                generation.staged.update(batch)
+            for object_id, item in batch.items():
+                generation.metadata[object_id] = dict(item.metadata)
+            if generation.sealed:
+                generation.built = await self._maintain(scope, generation.built)
         return WriteReport(written=len(items))
 
     async def remove(self, scope: Scope, generation_id: str, object_ids: Sequence[str]) -> int:
-        """Remove staged items or tombstone built ones."""
+        """Remove present objects; returns how many were present."""
         generation = self._generations.get((scope.key, generation_id))
         if generation is None:
             return 0
-        removed = 0
-        for object_id in object_ids:
+        async with generation.lock:
+            present = [oid for oid in dict.fromkeys(object_ids) if oid in generation.metadata]
+            for object_id in present:
+                del generation.metadata[object_id]
+                generation.staged.pop(object_id, None)
             if generation.sealed:
-                if object_id in generation.metadata and object_id not in generation.tombstones:
-                    generation.tombstones.add(object_id)
-                    removed += 1
-            elif generation.items.pop(object_id, None) is not None:
-                generation.metadata.pop(object_id, None)
-                removed += 1
-        return removed
+                self._delete(generation.built, present)
+                generation.built = await self._maintain(scope, generation.built)
+        return len(present)
 
     async def update_metadata(
         self, scope: Scope, generation_id: str, updates: Mapping[str, Metadata]
@@ -116,21 +138,23 @@ class InMemoryGenerationalIndex(GenerationalIndexABC):
         generation = self.generation(scope, generation_id)
         updated = 0
         for object_id, metadata in updates.items():
-            if object_id in generation.metadata and object_id not in generation.tombstones:
+            if object_id in generation.metadata:
                 generation.metadata[object_id] = dict(metadata)
                 updated += 1
         return updated
 
     async def seal(self, scope: Scope, generation_id: str) -> GenerationStats:
-        """Build the search structure (idempotent)."""
+        """Build the search structure from the staged items (idempotent)."""
         generation = self.generation(scope, generation_id)
-        if not generation.sealed:
-            items = list(generation.items.values())
-            generation.built = await self._build(scope, generation.spec, items)
-            generation.items = {}
-            generation.sealed = True
-        live = len(generation.metadata) - len(generation.tombstones)
-        return GenerationStats(object_count=live)
+        async with generation.lock:
+            if not generation.sealed:
+                items = list(generation.staged.values())
+                generation.built = await self.offloader.run(
+                    self.workload, self._build, generation.spec, items, tenant=scope.tenant_id
+                )
+                generation.staged = {}
+                generation.sealed = True
+        return GenerationStats(object_count=len(generation.metadata))
 
     async def drop_generation(self, scope: Scope, generation_id: str) -> None:
         """Delete a generation (idempotent)."""
@@ -149,6 +173,33 @@ class InMemoryGenerationalIndex(GenerationalIndexABC):
             )
         return generation
 
+    def _build(self, spec: GenerationSpec, items: list[IndexItem]) -> Any:
+        """Build a structure holding ``items`` (runs in a worker thread)."""
+        structure = self._empty(spec)
+        self._insert(structure, self._analyze(structure, items))
+        return structure
+
     @abstractmethod
-    async def _build(self, scope: Scope, spec: GenerationSpec, items: list[IndexItem]) -> Any:
-        """Build the search structure of a generation."""
+    def _empty(self, spec: GenerationSpec) -> Any:
+        """Return an empty search structure for a generation built with ``spec``."""
+
+    @abstractmethod
+    def _analyze(self, structure: Any, items: list[IndexItem]) -> Any:
+        """Derive what ``_insert`` needs from ``items`` (worker thread; must not mutate)."""
+
+    @abstractmethod
+    def _insert(self, structure: Any, analysis: Any) -> None:
+        """Add analysed objects that are not in ``structure``."""
+
+    @abstractmethod
+    def _delete(self, structure: Any, object_ids: list[str]) -> None:
+        """Remove objects that are in ``structure``."""
+
+    async def _maintain(self, scope: Scope, structure: Any) -> Any:
+        """Return the structure to use after a change (e.g. a compacted copy).
+
+        Runs while the generation's lock is held, so no other change interleaves;
+        searches may keep reading the previous structure.
+        """
+        del scope
+        return structure

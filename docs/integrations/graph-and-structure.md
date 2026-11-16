@@ -50,6 +50,12 @@ database.
 - All access goes through one connection on a dedicated single thread
   (LadybugDB has a single writer), through the offloader as
   `WorkloadKind.GRAPH_QUERY`.
+- A database file has one owner process. Opening a file that another process
+  holds raises `BackendUnavailableError` (retryable, with the file in
+  `details["path"]`) immediately; it does not wait for the lock. To share a
+  graph between processes, use one owner process or a `GraphStoreABC` on a
+  server database such as Neo4j. See
+  [Keep data on disk](../guide/how-to/durable-storage.md#the-graph-file-has-one-owner-process).
 
 The default retriever, `NeighborhoodGraphRetriever(depth=1, max_ngram=4,
 seed_limit=20)`, finds entities whose name or alias equals a query n-gram
@@ -88,5 +94,5 @@ Implement `GraphStoreABC`, `GraphRetrieverABC`, `GraphNormalizerABC`,
 `GraphExtractorABC` or `StructureEngineABC` and pass them in `Components`. See
 [Write a custom backend](../guide/how-to/custom-backends.md).
 
-See the [graph channel](../examples/graph-channel.md) and
-[structure channel](../examples/structure-channel.md) examples.
+See the [knowledge graph](../examples/knowledge-graph.md) and
+[policy manual](../examples/policy-manual.md) examples.

@@ -33,6 +33,8 @@ config = EngineConfig(
 | `cpu_per_job` | `None` | Optional CPU each job declares. Needs warm resourcera samples. |
 | `admission_wait_timeout` | `5.0` | Seconds to wait for admission. |
 | `max_workers` | `8` | Threads of the engine-owned executor. |
+| `max_cpu_jobs` | `None` | Engine-wide cap on CPU-bound jobs running at once. See [Capping CPU-bound jobs](../guide/concepts/offloading.md#capping-cpu-bound-jobs). |
+| `workload_limits` | `{}` | Per-`WorkloadKind` caps on jobs running at once. |
 | `max_concurrent_jobs_per_tenant` | `4` | Default per-tenant fair share. `TenantPolicy.max_concurrent_cpu_jobs` overrides it per tenant. |
 | `shutdown_timeout` | `30.0` | Seconds `close` waits for running threads. |
 | `resource_config` | `ResourceConfig(cpu_budget_fraction=0.05)` | Settings of the engine-owned manager. |

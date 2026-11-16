@@ -29,6 +29,7 @@ from retrievalloom.errors import GenerationError
 from retrievalloom.lifecycle.coordinator import LifecycleCoordinator
 from retrievalloom.lifecycle.indexer import ReaderTracker, UnitIndexer
 from retrievalloom.lifecycle.ingestion import IngestionService
+from retrievalloom.lifecycle.purge import DocumentEraser
 from retrievalloom.lifecycle.units import ItemPreparer, make_unit
 from retrievalloom.storage.sqlite import SQLiteMetadataStore, SQLiteTransaction
 
@@ -226,6 +227,7 @@ class Harness:
     ingestion: IngestionService
     indexer: UnitIndexer
     coordinator: LifecycleCoordinator
+    eraser: DocumentEraser
     units: tuple[IndexUnit, ...]
     readers: ReaderTracker
     instance_id: str
@@ -263,6 +265,10 @@ def build(
         logger=logger,
         readers=readers,
     )
+    service = IngestionService(
+        store, ingestion or IngestionConfig(), clock=clock, logger=logger, graph=graph
+    )
+    eraser = DocumentEraser(store, service, indexer, units, clock=clock, logger=logger)
     coordinator = LifecycleCoordinator(
         store,
         indexer,
@@ -272,9 +278,7 @@ def build(
         engine_id="engine-1",
         clock=clock,
         logger=logger,
-    )
-    service = IngestionService(
-        store, ingestion or IngestionConfig(), clock=clock, logger=logger, graph=graph
+        eraser=eraser,
     )
     return Harness(
         store=store,
@@ -283,6 +287,7 @@ def build(
         ingestion=service,
         indexer=indexer,
         coordinator=coordinator,
+        eraser=eraser,
         units=tuple(units),
         readers=readers,
         instance_id=instance,

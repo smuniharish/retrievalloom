@@ -224,6 +224,8 @@ async def test_ingest_authorization_and_batch_limit() -> None:
             await engine.ingest(DOCS[:1], scope=GLOBEX)
         with pytest.raises(AccessDeniedError):
             await engine.delete(["d1"], scope=GLOBEX)
+        with pytest.raises(AccessDeniedError):
+            await engine.purge(["d1"], scope=GLOBEX)
         policy.denied = set()
         with pytest.raises(ValidationError) as limited:
             await engine.ingest(DOCS, scope=ACME)

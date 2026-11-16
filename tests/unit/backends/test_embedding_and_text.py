@@ -179,17 +179,17 @@ class _Transaction:
     def __init__(self, store: FakeStore) -> None:
         self._store = store
 
-    async def list_documents(
+    async def list_document_metadata(
         self, scope_key: str, *, state: Any, after_id: str | None, limit: int
-    ) -> list[_Document]:
+    ) -> list[tuple[str, dict[str, Any]]]:
         self._store.calls.append((scope_key, str(state), after_id, limit))
         rows = sorted(self._store.documents, key=lambda document: document.document_id)
         rows = [row for row in rows if after_id is None or row.document_id > after_id]
-        return rows[:limit]
+        return [(row.document_id, row.metadata) for row in rows[:limit]]
 
 
 class FakeStore:
-    """Paged ``list_documents`` over an in-memory list of active documents."""
+    """Paged ``list_document_metadata`` over an in-memory list of active documents."""
 
     def __init__(self, documents: list[_Document]) -> None:
         self.documents = documents
@@ -222,17 +222,17 @@ async def test_metadata_dictionary_collects_strings_and_lists(context: Component
     # Static entries win on folded collisions; output is sorted by folded form.
     assert [entry.canonical for entry in entries] == ["asyncio", "Python", "Rust", "uv"]
     assert entries[1].aliases == ("py",)
-    assert store.calls == [(SCOPE.key, "active", None, 500)]
+    assert store.calls == [(SCOPE.key, "active", None, 5000)]
 
 
 async def test_metadata_dictionary_pages_through_documents(context: ComponentContext) -> None:
-    documents = [_Document(f"d{index:04d}", {"keywords": f"kw{index}"}) for index in range(501)]
+    documents = [_Document(f"d{index:04d}", {"keywords": f"kw{index}"}) for index in range(5001)]
     store = FakeStore(documents)
     dictionary = MetadataKeywordDictionary()
     await dictionary.initialize(with_store(context, store))
     entries = await dictionary.entries(SCOPE)
-    assert len(entries) == 501
-    assert [call[2] for call in store.calls] == [None, "d0499"]
+    assert len(entries) == 5001
+    assert [call[2] for call in store.calls] == [None, "d4999"]
 
 
 async def test_metadata_dictionary_without_store_or_fields_uses_static_only(

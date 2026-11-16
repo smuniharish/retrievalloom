@@ -54,13 +54,15 @@ of two things:
 - **Incremental update.** If the unit already has a generation with the
   current fingerprint and its backend can be changed in place, the new and
   changed documents are written to the active generation and the objects of
-  their older versions are removed. Deleted documents are removed. The Qdrant
-  vector store and the TreeSearch structure engine work this way.
+  their older versions are removed. Deleted documents are removed. The
+  keyword, fuzzy and sparse indexes, the Qdrant vector store and the
+  TreeSearch structure engine work this way, so an ingest batch costs time
+  proportional to the batch, not to the corpus.
 - **Full build.** Otherwise a new generation is built from the metadata store
   and published. This happens for the first build, after a fingerprint change,
-  after `rebuild`, and for every change on backends that cannot be changed in
-  place (keyword, fuzzy and sparse indexes) and on the graph channel (graph
-  aggregates depend on many documents).
+  after `rebuild`, when the keyword dictionary changed (keyword and fuzzy
+  units), for every change on backends that cannot be changed in place, and
+  on the graph channel (graph aggregates depend on many documents).
 
 A document version becomes visible to a unit only when it is indexed there.
 Until then, hits of its previous version are dropped (a
@@ -100,6 +102,46 @@ print(result.state.value)  # "succeeded"
 
 See [Backfill and rebuild](../how-to/backfill-and-rebuild.md).
 
+## Deletion, erasure and retention
+
+`delete` makes a document a *tombstone*: it is hidden from retrieval at once,
+its objects and graph contributions are retracted, and the next rounds remove
+its objects from the indexes and mark its coverage `deleted`. The metadata
+store still holds its versions, representations, events and objects.
+
+`purge(ids, scope=...)` erases documents physically. It tombstones them first
+when needed, then for each document:
+
+1. removes its objects, and graph aggregates no other document supports, from
+   every building, active and retiring generation of this engine's units;
+2. queues a `rebuild` of the graph unit when the active graph generation still
+   includes the document (the task ids are in `PurgeReport.task_ids`);
+3. deletes every metadata row of the document in one transaction: the
+   document, its versions, representations, ingestion events, objects,
+   contributions, lineage edges, visibility windows and coverage.
+
+If a backend fails in step 1, nothing is deleted from the metadata store and
+the call raises; retry it. Purging is idempotent: unknown and already purged
+ids are reported in `not_found`. The same access policy action as `delete`
+authorizes it.
+
+The maintenance round also erases tombstones on its own once they are older
+than `purge_after` (default 7 days) and every unit has marked them `deleted`.
+It prunes history too:
+
+- **Versions.** Only the newest `max_versions` (default 10) version-history
+  entries of a document are kept, with their representations. A version is
+  never pruned while it is the current version, has live objects or supports
+  a live graph aggregate, is visible to a unit, or is indexed by an active or
+  retiring generation.
+- **Events.** Committed and failed ingestion events older than
+  `event_retention` (default 90 days) are deleted. A redelivery of an event
+  older than that is processed again instead of being reported as `replayed`.
+
+Set any of the three to `None` to disable it. With the background scheduler,
+this housekeeping runs at most every five minutes; `run_lifecycle_once` always
+runs it.
+
 ## Ephemeral and durable backends
 
 A backend is *durable* when its data outlives the engine process:
@@ -116,7 +158,8 @@ Ephemeral generations belong to one engine instance. Their metadata rows
 purged when the engine closes or its registration expires
 (`instance_ttl`). With `auto_rebuild_ephemeral=True`, a new engine rebuilds
 them from the metadata store at startup: before the engine opens when
-`background=False`, otherwise in the first background round (see
+`background=False` or `wait_for_rebuild=True` (bounded by `rebuild_timeout`),
+otherwise in the first background round (see
 [Keep data on disk](../how-to/durable-storage.md)).
 
 Durable generations are shared by every engine that uses the same metadata

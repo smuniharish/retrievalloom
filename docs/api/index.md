@@ -12,7 +12,7 @@ shows the module where the object is defined.
 | [Runtime](runtime.md) | `Offloader`, `OffloaderConfig`, `WorkloadKind` |
 | [Inputs and filters](inputs.md) | `Scope`, `DocumentInput`, the representations, and the filter expressions |
 | [Results and evidence](results.md) | `RetrievalExecutionConfig`, `RetrievalResult`, `Evidence`, candidates, warnings and provenance |
-| [Records and reports](records.md) | `IngestReport`, `DeleteReport`, `ScopeStatus`, `HealthReport`, lifecycle enumerations |
+| [Records and reports](records.md) | `IngestReport`, `DeleteReport`, `PurgeReport`, `ScopeStatus`, `HealthReport`, lifecycle enumerations |
 | [Contracts](contracts.md) | The component abstract base classes, from `EmbeddingModelABC` to `ProvenanceRecorderABC` |
 | [Built-in components](components.md) | Default tokenizer, index backends, Qdrant, LadybugDB, TreeSearch, fusion, FlashRank, caches |
 | [Storage](storage.md) | `SQLiteMetadataStore` and the metadata store contracts |

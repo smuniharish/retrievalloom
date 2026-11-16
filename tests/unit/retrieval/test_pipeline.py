@@ -7,10 +7,12 @@ import contextlib
 import dataclasses
 import functools
 import math
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
+import retrievalloom.engine as engine_module
 from retrievalloom import (
     BackendUnavailableError,
     ChannelsConfig,
@@ -45,6 +47,7 @@ from retrievalloom import (
 from retrievalloom.domain.records import Channel
 from retrievalloom.evidence.consolidation import HierarchicalConsolidator
 from retrievalloom.evidence.fusion import RRFFusion
+from retrievalloom.evidence.rerank import FlashRankReranker
 from retrievalloom.retrieval.pipeline import RetrievalPipeline
 from tests.fakes import CapitalizedExtractor, HashEmbedding, OverlapReranker, RuleNLI
 from tests.unit.retrieval.helpers import (
@@ -492,6 +495,42 @@ async def test_rerank_fail_policy_raises() -> None:
         reranker.script = _raise(TenantIsolationError("leak"))
         with pytest.raises(TenantIsolationError):
             await engine.retrieve("asyncio", scope=ACME)
+
+
+# default FlashRank reranker -----------------------------------------------------------------
+async def test_default_reranker_without_model_keeps_fused_order(tmp_path: Path) -> None:
+    config = RetrievalConfig(reranking=RerankingConfig(model_dir=tmp_path))
+    async with ingested(retrieval=config) as engine:
+        health = await engine.health()
+        result = await engine.retrieve("asyncio", scope=ACME)
+    assert all("flashrank" not in report.component for report in health.components)
+    assert WarningCode.RERANKER_UNAVAILABLE not in _codes(result)
+    assert "rerank" not in [s.stage for s in result.evidence[0].provenance.stage_trail]
+
+
+async def test_default_reranker_is_wired_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    reranker = OverlapReranker()
+    monkeypatch.setattr(engine_module, "_default_reranker", lambda config, data_dir: reranker)
+    async with ingested() as engine:
+        result = await engine.retrieve("asyncio", scope=ACME)
+    assert "rerank" in [s.stage for s in result.evidence[0].provenance.stage_trail]
+    async with ingested(retrieval=RetrievalConfig(reranking=RerankingConfig(enabled=False))) as e:
+        result = await e.retrieve("asyncio", scope=ACME)
+    assert "rerank" not in [s.stage for s in result.evidence[0].provenance.stage_trail]
+
+
+def test_default_reranker_model_dir(tmp_path: Path) -> None:
+    config = RerankingConfig()
+    model = config.model_name
+    in_data_dir = engine_module._default_reranker(config, tmp_path)
+    assert isinstance(in_data_dir, FlashRankReranker)
+    assert in_data_dir.model_path.parent == tmp_path / "models" / model
+    in_home = engine_module._default_reranker(config, None)
+    assert isinstance(in_home, FlashRankReranker)
+    assert in_home.model_path.parent == Path.home() / ".cache" / "retrievalloom" / "models" / model
+    explicit = engine_module._default_reranker(RerankingConfig(model_dir=tmp_path / "x"), tmp_path)
+    assert isinstance(explicit, FlashRankReranker)
+    assert explicit.model_path.parent == tmp_path / "x" / model
 
 
 # NLI ----------------------------------------------------------------------------------------

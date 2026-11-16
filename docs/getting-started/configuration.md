@@ -70,7 +70,7 @@ components=..., resources=...)` builds the same engine from the individual layer
 | `channels` | index on, graph and structure off | Which channels and methods run. See [Channels and methods](../guide/concepts/channels.md). |
 | `method_fusion` | `rrf`, `k=60` | Fuses the methods of the index channel. |
 | `channel_fusion` | `rrf`, `k=60` | Fuses the channels. |
-| `reranking` | `enabled=True`, `rerank_k=50` | Reranks the top candidates when a reranker is configured. |
+| `reranking` | `enabled=True`, `rerank_k=50`, `model_dir=None`, `model_name="ms-marco-TinyBERT-L-2-v2"`, `allow_download=False` | Reranks the top candidates with the default FlashRank reranker (when its model files are present) or `Components.reranker`. See [Rerank and verify with NLI](../guide/how-to/rerank-and-nli.md). |
 | `nli` | `enabled=False`, `nli_k=10` | Judges claims against candidates when an NLI model is configured. |
 | `consolidation` | see below | Groups candidates into evidence. |
 | `default_top_k` | `10` | Evidence items returned when `top_k` is not given. |
@@ -147,7 +147,12 @@ Each method of the index channel (`keyword`, `fuzzy`, `sparse`, `dense`) has a
 | `instance_ttl` | `120` | Seconds an engine instance stays registered without a heartbeat. |
 | `lease_ttl` | `120` | Seconds a durable reader lease lasts. See [Run several engines on one store](../guide/how-to/multiple-engines.md). |
 | `generation_retention` | `0` | Extra seconds a retired generation is kept before it is dropped. |
-| `auto_rebuild_ephemeral` | `True` | Rebuild ephemeral (in-memory) backends from the metadata store at startup. Without `background`, the rebuild finishes before the engine opens; with it, the rebuild runs in the first background round. |
+| `auto_rebuild_ephemeral` | `True` | Rebuild ephemeral (in-memory) backends from the metadata store at startup. Without `background` (or with `wait_for_rebuild`), the rebuild finishes before the engine opens; otherwise it runs in the first background round. |
+| `wait_for_rebuild` | `False` | With `background`, still finish the startup rebuild before the engine opens, so the first requests get no `index_missing` warnings. |
+| `rebuild_timeout` | `300` | Seconds a startup rebuild may delay opening when `background` is on. On timeout the engine opens and the rebuild continues in the background. |
+| `purge_after` | `604800` (7 days) | Seconds a deleted document stays a tombstone before maintenance erases it physically. `None` disables. |
+| `max_versions` | `10` | Version-history entries kept per document. Older versions that nothing references are pruned with their representations. `None` disables. |
+| `event_retention` | `7776000` (90 days) | Seconds committed and failed ingestion events are kept. `None` disables. |
 | `migration` | `auto` | `auto` upgrades the metadata schema on start. `verify` only checks it. |
 | `shutdown_timeout` | `30` | Seconds `close` waits for in-flight work. |
 
@@ -159,6 +164,8 @@ Each method of the index channel (`keyword`, `fuzzy`, `sparse`, `dense`) has a
 | Field | Default |
 | --- | --- |
 | `max_workers` | `8` |
+| `max_cpu_jobs` | `None` |
+| `workload_limits` | `{}` |
 | `max_concurrent_jobs_per_tenant` | `4` |
 | `admission_wait_timeout` | `5` |
 | `memory_per_job` | `"16MB"` |

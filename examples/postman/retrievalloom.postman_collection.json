@@ -1,0 +1,319 @@
+{
+  "info": {
+    "name": "RetrievalLoom example service",
+    "description": "Requests for examples/http_service.py (python examples/http_service.py --serve). Run them in order: ingest, retrieve, denied calls, delete, status, health.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:8000"
+    },
+    {
+      "key": "tenant",
+      "value": "acme"
+    },
+    {
+      "key": "collection",
+      "value": "help"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/health",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "health"
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+              "pm.test('engine healthy', function () { pm.expect(pm.response.json().status).to.eql('healthy'); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Ingest documents (editor)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "X-Principal",
+            "value": "acme:editor"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/ingest",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "ingest"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"tenant\": \"{{tenant}}\",\n  \"collection\": \"{{collection}}\",\n  \"documents\": [\n    {\n      \"id\": \"pay-refund\",\n      \"title\": \"Refunding a customer payment\",\n      \"text\": \"To refund a payment, open the invoice in AcmePay, choose Refund and enter the amount. Card refunds reach the customer within five to ten business days.\",\n      \"metadata\": {\n        \"product\": \"acmepay\",\n        \"language\": \"en\",\n        \"visibility\": \"public\"\n      }\n    },\n    {\n      \"id\": \"sync-2fa\",\n      \"title\": \"Two-factor authentication on new devices\",\n      \"text\": \"After you enable two-factor authentication, every new device asks for a six-digit code from your authenticator app.\",\n      \"metadata\": {\n        \"product\": \"acmesync\",\n        \"language\": \"en\",\n        \"visibility\": \"public\"\n      }\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+              "pm.test('two documents', function () { pm.expect(pm.response.json().documents).to.have.lengthOf(2); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Retrieve (viewer, filtered)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "X-Principal",
+            "value": "acme:viewer"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/retrieve",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "retrieve"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"tenant\": \"{{tenant}}\",\n  \"collection\": \"{{collection}}\",\n  \"query\": \"refund a card payment\",\n  \"top_k\": 3,\n  \"filters\": {\n    \"language\": \"en\"\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+              "pm.test('refund article first', function () { pm.expect(pm.response.json().evidence[0].document_id).to.eql('pay-refund'); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Ingest as viewer (403)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "X-Principal",
+            "value": "acme:viewer"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/ingest",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "ingest"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"tenant\": \"{{tenant}}\",\n  \"collection\": \"{{collection}}\",\n  \"documents\": [\n    {\n      \"id\": \"pay-refund\",\n      \"title\": \"Refunding a customer payment\",\n      \"text\": \"To refund a payment, open the invoice in AcmePay, choose Refund and enter the amount. Card refunds reach the customer within five to ten business days.\",\n      \"metadata\": {\n        \"product\": \"acmepay\",\n        \"language\": \"en\",\n        \"visibility\": \"public\"\n      }\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 403', function () { pm.response.to.have.status(403); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Retrieve as another tenant (403)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "X-Principal",
+            "value": "globex:admin"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/retrieve",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "retrieve"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"tenant\": \"{{tenant}}\",\n  \"collection\": \"{{collection}}\",\n  \"query\": \"refund\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 403', function () { pm.response.to.have.status(403); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Delete document (editor)",
+      "request": {
+        "method": "DELETE",
+        "header": [
+          {
+            "key": "X-Principal",
+            "value": "acme:editor"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/documents/sync-2fa?tenant={{tenant}}&collection={{collection}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "documents",
+            "sync-2fa"
+          ],
+          "query": [
+            {
+              "key": "tenant",
+              "value": "{{tenant}}"
+            },
+            {
+              "key": "collection",
+              "value": "{{collection}}"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', function () { pm.response.to.have.status(200); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Status (viewer)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-Principal",
+            "value": "acme:viewer"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/status?tenant={{tenant}}&collection={{collection}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "status"
+          ],
+          "query": [
+            {
+              "key": "tenant",
+              "value": "{{tenant}}"
+            },
+            {
+              "key": "collection",
+              "value": "{{collection}}"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+              "pm.test('one deleted', function () { pm.expect(pm.response.json().documents_deleted).to.eql(1); });"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

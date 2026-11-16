@@ -1,0 +1,22 @@
+[
+  {
+    "id": "checkout-architecture",
+    "title": "Checkout architecture",
+    "text": "The Checkout Service depends on Payments Gateway. Checkout Service stores orders in Orders DB. Orders DB runs on Postgres. Postgres is hosted in Frankfurt Region."
+  },
+  {
+    "id": "payments-overview",
+    "title": "Payments overview",
+    "text": "Payments Gateway forwards card data to Card Vault. Team Falcon owns Payments Gateway. Card Vault is audited by Compliance Office every quarter."
+  },
+  {
+    "id": "team-directory",
+    "title": "Team directory",
+    "text": "Maria Okafor leads Team Falcon. Team Falcon is on call for Checkout. Jonas Berg leads Team Harbor. Team Harbor operates PG."
+  },
+  {
+    "id": "incident-2041",
+    "title": "Incident 2041 postmortem",
+    "text": "PG failed over to Frankfurt Region during the incident. Checkout returned errors for eleven minutes until connections were re-established. The postmortem recommends shorter connection timeouts in the checkout client."
+  }
+]

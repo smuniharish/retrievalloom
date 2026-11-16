@@ -5,6 +5,12 @@ generations and leases. See [Metadata store](../architecture/storage.md).
 
 ::: retrievalloom.storage.sqlite.SQLiteMetadataStore
 
+::: retrievalloom.storage.postgres.PostgresMetadataStore
+
+::: retrievalloom.storage.postgres.classify_error
+
+::: retrievalloom.storage.sql.SQLAlchemyMetadataStore
+
 ::: retrievalloom.storage.base.DocumentMetadataStoreABC
 
 ::: retrievalloom.storage.base.MetadataTransactionABC

@@ -186,7 +186,7 @@ def test_reranking_and_nli_resolution() -> None:
     assert not plan.reranking
     assert not plan.nli
     infos = {(w.code, w.severity) for w in plan.warnings}
-    assert (WarningCode.RERANKER_UNAVAILABLE, Severity.INFO) in infos
+    assert WarningCode.RERANKER_UNAVAILABLE not in {code for code, _ in infos}
     assert (WarningCode.STAGE_SKIPPED, Severity.INFO) in infos
 
     plan = _plan(config, _request(RetrievalExecutionConfig(reranking=True, nli=True)))

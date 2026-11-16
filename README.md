@@ -63,7 +63,8 @@ LlamaIndex or any other framework.
 - **Lifecycle management.** Incremental indexing, backfill when you add a
   method, rebuild when you change a model, and safe retirement of old
   generations while readers still use them.
-- **Optional evidence stages.** Rerank with FlashRank or your own model, check
+- **Optional evidence stages.** Rerank with the built-in FlashRank reranker
+  (used by default when its model is present) or your own model, check
   support and contradiction with an NLI model, and consolidate overlapping
   spans.
 - **Durable storage.** SQLite metadata with Alembic migrations, and Qdrant in
@@ -244,19 +245,22 @@ for the method, the results and how to reproduce them.
 ## Examples
 
 Complete programs in [`examples/`](https://github.com/smuniharish/retrievalloom/tree/main/examples),
-each run by the test suite:
+each run by the test suite. Custom components for almost every extension point are in [`examples/adapters/`](https://retrievalloom.readthedocs.io/en/latest/examples/adapters/):
 
 | Example | Shows | Needs |
 | --- | --- | --- |
 | [`quickstart.py`](https://retrievalloom.readthedocs.io/en/latest/examples/quickstart/) | Ingest and retrieve in memory | Base install |
-| [`multi_tenant.py`](https://retrievalloom.readthedocs.io/en/latest/examples/multi-tenant/) | Scopes, tenant isolation and a per-tenant policy | Base install |
+| [`customer_support.py`](https://retrievalloom.readthedocs.io/en/latest/examples/customer-support/) | Help-center search: keyword, fuzzy, BM25 and bge-m3 dense fused, cross-encoder rerank, filters | Local models, Qdrant |
+| [`multi_tenant_saas.py`](https://retrievalloom.readthedocs.io/en/latest/examples/multi-tenant-saas/) | Tenant isolation, a role-based access policy, quotas and an audit log | Base install |
+| [`document_lifecycle.py`](https://retrievalloom.readthedocs.io/en/latest/examples/document-lifecycle/) | Updates, deletes, purge, backfill and rebuild on pgvector | Local models, pgvector |
+| [`knowledge_graph.py`](https://retrievalloom.readthedocs.io/en/latest/examples/knowledge-graph/) | Entity extraction, graph channel on Neo4j or LadybugDB, graph + index fusion | `graph` extra; Neo4j optional |
+| [`policy_manual.py`](https://retrievalloom.readthedocs.io/en/latest/examples/policy-manual/) | Long sectioned documents with the structure channel | `structure` extra |
+| [`fact_checking.py`](https://retrievalloom.readthedocs.io/en/latest/examples/fact-checking/) | Claim verification with NLI and contradictions | Local models |
+| [`http_service.py`](https://retrievalloom.readthedocs.io/en/latest/examples/http-service/) | A FastAPI service with a Postman collection | `examples` group |
+| [`observability_jaeger.py`](https://retrievalloom.readthedocs.io/en/latest/examples/observability-jaeger/) | OpenTelemetry traces in Jaeger and trace ids in logs | `agxai` extra; Jaeger optional |
+| [`durable_restart.py`](https://retrievalloom.readthedocs.io/en/latest/examples/durable-restart/) | Restart on SQLite metadata and Qdrant without re-ingesting | Local models, Qdrant |
 | [`prechunked_and_multi_representation.py`](https://retrievalloom.readthedocs.io/en/latest/examples/prechunked-and-multi-representation/) | Your own chunks, spans and pages | Base install |
-| [`graph_channel.py`](https://retrievalloom.readthedocs.io/en/latest/examples/graph-channel/) | The graph channel | `graph` extra |
-| [`structure_channel.py`](https://retrievalloom.readthedocs.io/en/latest/examples/structure-channel/) | The structure channel | `structure` extra |
-| [`lifecycle_backfill_rebuild.py`](https://retrievalloom.readthedocs.io/en/latest/examples/lifecycle-backfill-rebuild/) | Backfill and rebuild of indexes | Base install |
 | [`agxai_provenance.py`](https://retrievalloom.readthedocs.io/en/latest/examples/agxai-provenance/) | Recording retrievals with agxai | Base install |
-| [`byo_embeddings_qdrant.py`](https://retrievalloom.readthedocs.io/en/latest/examples/byo-embeddings-qdrant/) | bge-m3 embeddings with a Qdrant server | Qdrant and local models (live) |
-| [`custom_reranker_nli.py`](https://retrievalloom.readthedocs.io/en/latest/examples/custom-reranker-nli/) | Your own reranker and NLI model | Local models (live) |
 
 ## Documentation
 

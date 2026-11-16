@@ -1,0 +1,19 @@
+{
+  "acme": {
+    "handbook": [
+      {"id": "holidays", "visibility": "public", "text": "Acme employees receive 30 days of paid holiday per calendar year; unused days expire on 31 March of the following year."},
+      {"id": "expenses", "visibility": "internal", "text": "Travel expenses above 500 euros need approval from the cost-centre owner before booking; receipts are uploaded to the expense tool within 14 days."},
+      {"id": "salary-bands", "visibility": "restricted", "text": "Salary bands for engineering levels L3 to L6 are reviewed every January by the compensation committee."}
+    ],
+    "engineering": [
+      {"id": "oncall", "visibility": "internal", "text": "The on-call engineer acknowledges a paging alert within 15 minutes and opens an incident channel for every customer-facing outage."},
+      {"id": "holidays", "visibility": "public", "text": "Engineers on the on-call rota swap shifts before taking holiday and record the swap in the rota calendar."}
+    ]
+  },
+  "globex": {
+    "handbook": [
+      {"id": "holidays", "visibility": "public", "text": "Globex staff receive 25 days of paid holiday; up to five unused days can be carried over to the next year."},
+      {"id": "security", "visibility": "internal", "text": "Globex laptops must use full-disk encryption and lock the screen after five minutes of inactivity."}
+    ]
+  }
+}

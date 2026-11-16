@@ -17,7 +17,6 @@ from retrievalloom import (
 )
 from retrievalloom.config import NLIConfig
 from retrievalloom.domain.retrieval import Channel, NLILabel, ResultStatus
-from retrievalloom.evidence.rerank import FlashRankReranker
 from retrievalloom.index.vector import QdrantVectorStore
 from retrievalloom.storage.sqlite import SQLiteMetadataStore
 from retrievalloom.testing import EmbeddingModelContract, NLIContract, RerankerContract
@@ -30,8 +29,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 pytestmark = pytest.mark.models
-
-FLASHRANK_MODEL = "ms-marco-TinyBERT-L-2-v2"
 
 
 class _ModelKit(SharedResources):
@@ -53,16 +50,6 @@ class TestBgeRerankerV2(_ModelKit, RerankerContract):
 class TestUltraBertNLI(_ModelKit, NLIContract):
     async def make_component(self, tmp_path: Path) -> UltraBertNLI:
         return UltraBertNLI(self.models / "UltraBERT-150M-nli")
-
-
-class TestFlashRank(_ModelKit, RerankerContract):
-    """FlashRank never downloads here: the model must be pre-provisioned under models/."""
-
-    async def make_component(self, tmp_path: Path) -> FlashRankReranker:
-        reranker = FlashRankReranker(self.models / "flashrank", model_name=FLASHRANK_MODEL)
-        if not reranker.model_path.is_file():
-            pytest.skip(f"FlashRank model not provisioned at {reranker.model_path}")
-        return reranker
 
 
 CORPUS = {

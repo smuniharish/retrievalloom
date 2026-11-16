@@ -19,6 +19,7 @@ from retrievalloom.config import (
     IndexWait,
     IngestionConfig,
     LifecycleConfig,
+    RerankingConfig,
     RetrievalConfig,
 )
 from retrievalloom.contracts.component import ComponentContext
@@ -32,6 +33,7 @@ from retrievalloom.domain.reports import (
     HealthReport,
     HealthStatus,
     IngestReport,
+    PurgeReport,
     ScopeStatus,
 )
 from retrievalloom.domain.retrieval import (
@@ -63,6 +65,7 @@ from retrievalloom.infra.recorders import NoOpProvenanceRecorder
 from retrievalloom.lifecycle.coordinator import LifecycleCoordinator
 from retrievalloom.lifecycle.indexer import ReaderTracker, UnitIndexer, task_units
 from retrievalloom.lifecycle.ingestion import GraphDerivation, IngestionService
+from retrievalloom.lifecycle.purge import DocumentEraser
 from retrievalloom.lifecycle.units import ItemPreparer, make_unit
 from retrievalloom.retrieval.pipeline import PipelineComponents, RetrievalPipeline
 from retrievalloom.runtime.offloader import Offloader, OffloaderConfig
@@ -85,7 +88,7 @@ if TYPE_CHECKING:
         VectorStoreABC,
     )
     from retrievalloom.contracts.infra import AccessPolicyABC, ProvenanceRecorderABC
-    from retrievalloom.contracts.models import GraphNormalizerABC
+    from retrievalloom.contracts.models import GraphNormalizerABC, RerankerABC
     from retrievalloom.domain.filters import FilterExpression
     from retrievalloom.domain.inputs import DocumentInput, Scope
     from retrievalloom.domain.reports import LifecycleTaskRef, LifecycleTaskResult
@@ -115,6 +118,7 @@ class _Runtime:
     units: dict[str, IndexUnit]
     coordinator: LifecycleCoordinator
     ingestion: IngestionService
+    eraser: DocumentEraser
     pipeline: RetrievalPipeline
     access: AccessPolicyABC
     recorder: ProvenanceRecorderABC
@@ -328,6 +332,28 @@ class RetrievalEngine:
                 report = await runtime.ingestion.delete(document_ids, scope)
                 await self._index_after_write(runtime, scope)
                 return await self._record_write(runtime, report)
+
+    async def purge(
+        self, document_ids: Sequence[str], *, scope: Scope, principal: str | None = None
+    ) -> PurgeReport:
+        """Physically erase documents (right to erasure), tombstoning them first if needed.
+
+        The documents' objects are removed from every index generation of this engine
+        and every metadata row of the documents (versions, representations, events,
+        objects, lineage, visibility, coverage) is deleted. Purging is idempotent:
+        unknown or already purged ids are reported as `not_found`.
+
+        Raises:
+            AccessDeniedError: The access policy denied the operation.
+            BackendError: A backend failed to remove objects; nothing was purged for
+                that document and the call can be retried.
+        """
+        async with self._operation() as runtime:
+            with structlog.contextvars.bound_contextvars(scope_key=scope.key):
+                await self._authorize(runtime, principal, scope, Action.DELETE)
+                report = await runtime.eraser.purge(document_ids, scope)
+                await self._index_after_write(runtime, scope)
+                return report
 
     async def retrieve(
         self,
@@ -607,7 +633,11 @@ class RetrievalEngine:
         consolidator = wiring.use(supplied.consolidator, HierarchicalConsolidator)
         method_fusion = wiring.use(supplied.method_fusion, None)
         channel_fusion = wiring.use(supplied.channel_fusion, None)
-        reranker = wiring.use(supplied.reranker, None)
+        reranking = retrieval.reranking
+        reranker = wiring.use(
+            supplied.reranker,
+            (lambda: _default_reranker(reranking, data_dir)) if reranking.enabled else None,
+        )
         nli = wiring.use(supplied.nli, None)
         cache = wiring.use(supplied.cache, NoCache)
         embedding_cache = None
@@ -628,6 +658,7 @@ class RetrievalEngine:
 
         for component in wiring.ordered[1:]:
             await component.initialize(context)
+        reranker = await self._usable_reranker(reranker, wiring)
 
         embedder = None if embedding is None else EmbeddingValidator(embedding, offloader)
         units = self._units(
@@ -649,6 +680,16 @@ class RetrievalEngine:
             logger=self._logger,
             readers=readers,
         )
+        ingestion = IngestionService(
+            store,
+            config.ingestion,
+            clock=utc_now,
+            logger=self._logger,
+            graph=None if normalizer is None else GraphDerivation(normalizer, extractor),
+        )
+        eraser = DocumentEraser(
+            store, ingestion, indexer, list(units.values()), clock=utc_now, logger=self._logger
+        )
         coordinator = LifecycleCoordinator(
             store,
             indexer,
@@ -658,13 +699,7 @@ class RetrievalEngine:
             engine_id=self._engine_id,
             clock=utc_now,
             logger=self._logger,
-        )
-        ingestion = IngestionService(
-            store,
-            config.ingestion,
-            clock=utc_now,
-            logger=self._logger,
-            graph=None if normalizer is None else GraphDerivation(normalizer, extractor),
+            eraser=eraser,
         )
         pipeline = RetrievalPipeline(
             PipelineComponents(
@@ -697,19 +732,18 @@ class RetrievalEngine:
             units=units,
             coordinator=coordinator,
             ingestion=ingestion,
+            eraser=eraser,
             pipeline=pipeline,
             access=access,
             recorder=recorder,
             initialized=wiring.ordered,
             owned=wiring.owned,
         )
-        await coordinator.start()
-        try:
-            if lifecycle.auto_rebuild_ephemeral and not lifecycle.background:
-                await coordinator.run_once()
-        except BaseException:
-            await coordinator.stop()
-            raise
+        await coordinator.start(
+            rebuild=lifecycle.auto_rebuild_ephemeral
+            and (not lifecycle.background or lifecycle.wait_for_rebuild),
+            rebuild_timeout=lifecycle.rebuild_timeout if lifecycle.background else None,
+        )
         return runtime
 
     def _units(
@@ -740,6 +774,24 @@ class RetrievalEngine:
         from retrievalloom.integrations.agxai import AgxaiProvenanceRecorder
 
         return AgxaiProvenanceRecorder(runtime)
+
+    async def _usable_reranker(
+        self, reranker: RerankerABC | None, wiring: _Wiring
+    ) -> RerankerABC | None:
+        """Drop the engine-owned default reranker when its model is unavailable.
+
+        Results then keep the fused order without a per-request warning; a supplied
+        reranker is always kept so its failures surface as ``reranker_unavailable``.
+        """
+        if reranker is None or id(reranker) not in wiring.owned:
+            return reranker
+        report = await self._component_health(reranker)
+        if report.status is HealthStatus.HEALTHY:
+            return reranker
+        wiring.ordered.remove(reranker)
+        wiring.owned.discard(id(reranker))
+        await self._close_components([reranker], {id(reranker)})
+        return None
 
     async def _close_components(self, components: Iterable[ComponentABC], owned: set[int]) -> None:
         for component in reversed(list(components)):
@@ -927,6 +979,20 @@ def _default_structure_engine(data_dir: Path | None) -> StructureEngineABC:
     from retrievalloom.structure.treesearch_engine import TreeSearchStructureEngine
 
     return TreeSearchStructureEngine(None if data_dir is None else data_dir / "structure")
+
+
+def _default_reranker(config: RerankingConfig, data_dir: Path | None) -> RerankerABC:
+    from pathlib import Path
+
+    from retrievalloom.evidence.rerank import FlashRankReranker
+
+    model_dir = config.model_dir
+    if model_dir is None:
+        base = Path.home() / ".cache" / "retrievalloom" if data_dir is None else data_dir
+        model_dir = base / "models"
+    return FlashRankReranker(
+        model_dir, model_name=config.model_name, allow_download=config.allow_download
+    )
 
 
 def create_retrieval_engine(

@@ -52,11 +52,19 @@ implementation.
 Rows of ephemeral units carry the engine instance id. Durable units use the
 shared instance (empty id).
 
-## SQLite implementation
+## Implementations
 
-`SQLiteMetadataStore` (`retrievalloom.storage.sqlite`) is the only built-in
-store. It uses SQLAlchemy async Core with aiosqlite, and Alembic migrations
-shipped in the package (`storage/migrations`).
+Both built-in stores share one implementation of every query,
+`SQLAlchemyMetadataStore` (`retrievalloom.storage.sql`), on SQLAlchemy async
+Core, and the Alembic migrations shipped in the package (`storage/migrations`).
+A dialect subclass supplies the engine, transaction isolation and locking, the
+dialect `INSERT ... ON CONFLICT` used for upserts, and the mapping of driver
+errors to RetrievalLoom errors.
+
+### SQLite
+
+`SQLiteMetadataStore` (`retrievalloom.storage.sqlite`) is the default store,
+on aiosqlite.
 
 ```python
 SQLiteMetadataStore(path=None, *, synchronous="NORMAL", busy_timeout_ms=30000, engine=None)
@@ -73,5 +81,63 @@ SQLiteMetadataStore(path=None, *, synchronous="NORMAL", busy_timeout_ms=30000, e
 Several engines, in one or several processes on one host, can share one file
 database. See [Run several engines on one store](../guide/how-to/multiple-engines.md).
 
-There is no PostgreSQL or other server-backed store yet. Implement
-`DocumentMetadataStoreABC` to use another database.
+### PostgreSQL
+
+`PostgresMetadataStore` (`retrievalloom.storage.postgres`, `postgres` extra) is
+on asyncpg. Engines on any number of hosts can share it. See
+[A shared PostgreSQL store](../guide/how-to/durable-storage.md#a-shared-postgresql-store).
+
+```python
+PostgresMetadataStore(
+    dsn=None, *, schema=None, pool_size=5, max_overflow=10, pool_timeout=30.0,
+    pool_recycle=1800, pool_pre_ping=True, lock_timeout_ms=30000,
+    statement_timeout_ms=None, application_name="retrievalloom",
+    connect_args=None, engine=None,
+)
+```
+
+Concurrency:
+
+- Write transactions run at `READ COMMITTED` and take transaction-level
+  advisory locks right after `BEGIN`. A write bound to a scope takes a global
+  lock in shared mode, then its scope's lock exclusively. Writers of one scope
+  therefore run one at a time, which is the guarantee SQLite's single writer
+  gives, and different scopes write in parallel. An unscoped write
+  (maintenance) takes the global lock exclusively.
+- Every check-then-write a transaction does (revision checks, lease and
+  generation fencing, task claims, generation publication) runs under its
+  scope's lock, so it cannot race another engine. Locks are always taken in
+  the same order (global, then scope), so they cannot deadlock each other.
+- The commit sequence is one row bumped by an atomic upsert. Its row lock
+  orders commit sequences by commit time.
+- Read transactions are `REPEATABLE READ READ ONLY` snapshots. They never wait
+  for writers.
+- Inside one engine, writers of one scope also queue on an `asyncio.Lock`, so
+  they do not hold pooled connections while they wait for the database lock.
+
+Errors:
+
+| SQLSTATE | Raised as |
+| --- | --- |
+| `40001`, `40P01`, class `23` | `VersionConflictError` (retryable; the engine retries the transaction) |
+| `55P03`, `57014` (lock or statement timeout) | `BackendTimeoutError` |
+| classes `08`, `53`, `57`, `58`, network errors, pool exhausted | `BackendUnavailableError` (retryable) |
+| classes `28`, `3D` (authentication, unknown database) | `BackendUnavailableError` (not retryable) |
+| class `22` (invalid value) | `ValidationError` |
+
+Types: timestamps are `timestamptz` in UTC, and JSON columns use `json`, which
+keeps key order as SQLite does. PostgreSQL is stricter than SQLite in three
+ways:
+
+- It rejects NUL characters in text columns. They are still allowed inside
+  JSON values such as metadata.
+- It enforces `VARCHAR` lengths.
+- Integer columns are 32-bit.
+
+`migrate()` creates `schema` if it is missing and applies the migrations under
+an exclusive advisory lock, so engines starting together migrate once.
+
+### Other databases
+
+Implement `DocumentMetadataStoreABC`, or subclass `SQLAlchemyMetadataStore`
+for another SQLAlchemy dialect, and check it with `MetadataStoreContract`.

@@ -1,10 +1,11 @@
-"""Exact dictionary keyword index built on ahocorasick-rs (in memory, immutable)."""
+"""Exact dictionary keyword index built on ahocorasick-rs (in memory, updated in place)."""
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from collections import Counter
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from retrievalloom.contracts.component import ComponentInfo, make_info
 from retrievalloom.contracts.indexes import KeywordIndexABC
@@ -34,36 +35,27 @@ _METHOD = MethodRef(channel=Channel.INDEX, method="keyword")
 _SEMANTICS = ScoreSemantics(higher_is_better=True, range=ScoreRange.UNBOUNDED)
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(slots=True)
 class _KeywordStructure:
+    """The generation's automaton plus canonical-keyword postings of the live objects."""
+
     matcher: PhraseMatcher
-    postings: dict[str, dict[str, int]]
-    document_count: int
-
-
-def build_keyword_structure(spec: GenerationSpec, items: list[IndexItem]) -> _KeywordStructure:
-    """Build the automaton and canonical-term postings (runs in a worker thread)."""
-    phrases: dict[str, str] = {}
-    for entry in spec.keyword_entries:
-        for surface in entry.surface_forms:
-            phrases.setdefault(surface, entry.canonical)
-    matcher = PhraseMatcher(phrases)
-    postings: dict[str, dict[str, int]] = {}
-    for item in items:
-        for canonical, _surface, _start, _end in matcher.find(item.text):
-            bucket = postings.setdefault(canonical, {})
-            bucket[item.object_id] = bucket.get(item.object_id, 0) + 1
-    return _KeywordStructure(matcher=matcher, postings=postings, document_count=len(items))
+    postings: dict[str, dict[str, int]] = field(default_factory=dict)
+    forward: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 class AhoCorasickKeywordIndex(KeywordIndexABC, InMemoryGenerationalIndex):
     """Dictionary keyword index.
 
-    The generation's dictionary (``GenerationSpec.keyword_entries``) is compiled into an
-    Aho-Corasick automaton; object texts are scanned once at ``seal`` to build postings of
-    canonical keywords. Queries are scanned with the same automaton; objects are scored by
-    the sum of ``idf`` of matched canonical keywords (``log(1 + N/df)``).
+    The generation's dictionary (``GenerationSpec.keyword_entries``) is compiled once
+    into an Aho-Corasick automaton; each written object's text is scanned once to post
+    the canonical keywords it contains, and removed objects are unposted, so updates cost
+    time proportional to the changed objects. Queries are scanned with the same
+    automaton; objects are scored by the sum of ``idf`` of matched canonical keywords
+    (``log(1 + N/df)`` over the live objects).
     """
+
+    workload = WorkloadKind.KEYWORD_BUILD
 
     def __init__(self) -> None:
         super().__init__()
@@ -74,10 +66,36 @@ class AhoCorasickKeywordIndex(KeywordIndexABC, InMemoryGenerationalIndex):
         """Component identity."""
         return self._info
 
-    async def _build(self, scope: Scope, spec: GenerationSpec, items: list[IndexItem]) -> Any:
-        return await self.offloader.run(
-            WorkloadKind.KEYWORD_BUILD, build_keyword_structure, spec, items, tenant=scope.tenant_id
-        )
+    def _empty(self, spec: GenerationSpec) -> _KeywordStructure:
+        phrases: dict[str, str] = {}
+        for entry in spec.keyword_entries:
+            for surface in entry.surface_forms:
+                phrases.setdefault(surface, entry.canonical)
+        return _KeywordStructure(matcher=PhraseMatcher(phrases))
+
+    def _analyze(
+        self, structure: _KeywordStructure, items: list[IndexItem]
+    ) -> list[tuple[str, Counter[str]]]:
+        return [
+            (item.object_id, Counter(match[0] for match in structure.matcher.find(item.text)))
+            for item in items
+        ]
+
+    def _insert(
+        self, structure: _KeywordStructure, analysis: list[tuple[str, Counter[str]]]
+    ) -> None:
+        for object_id, counts in analysis:
+            structure.forward[object_id] = tuple(counts)
+            for canonical, count in counts.items():
+                structure.postings.setdefault(canonical, {})[object_id] = count
+
+    def _delete(self, structure: _KeywordStructure, object_ids: list[str]) -> None:
+        for object_id in object_ids:
+            for canonical in structure.forward.pop(object_id):
+                posting = structure.postings[canonical]
+                del posting[object_id]
+                if not posting:
+                    del structure.postings[canonical]
 
     async def search(
         self,
@@ -94,19 +112,19 @@ class AhoCorasickKeywordIndex(KeywordIndexABC, InMemoryGenerationalIndex):
         matched: dict[str, tuple[str, int, int]] = {}
         for canonical, surface, start, end in structure.matcher.find(query.text):
             matched.setdefault(canonical, (surface, start, end))
+        document_count = len(structure.forward)
         scores: dict[str, float] = {}
         details: dict[str, list[MatchDetail]] = {}
         for canonical, (surface, start, end) in matched.items():
             posting = structure.postings.get(canonical, {})
-            live = [
+            passing = [
                 object_id
                 for object_id in posting
-                if object_id not in generation.tombstones
-                and evaluate(filters, generation.metadata.get(object_id, {}))
+                if evaluate(filters, generation.metadata.get(object_id, {}))
             ]
-            if not live:
+            if not passing:
                 continue
-            idf = math.log(1.0 + structure.document_count / len(posting))
+            idf = math.log(1.0 + document_count / len(posting))
             detail = MatchDetail(
                 kind="keyword",
                 term=canonical,
@@ -114,7 +132,7 @@ class AhoCorasickKeywordIndex(KeywordIndexABC, InMemoryGenerationalIndex):
                 query_span=TextSpan(start=start, end=end) if spans_valid else None,
                 score=idf,
             )
-            for object_id in live:
+            for object_id in passing:
                 scores[object_id] = scores.get(object_id, 0.0) + idf
                 details.setdefault(object_id, []).append(detail)
         ordered = sorted(scores.items(), key=lambda pair: (-pair[1], pair[0]))[:limit]

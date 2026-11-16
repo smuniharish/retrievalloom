@@ -2,7 +2,9 @@
 
 Several engines, in one process or many, can share indexes. They must share:
 
-- one metadata store (for example the same SQLite file), and
+- one metadata store (for example the same SQLite file for engines on one
+  host, or a [shared PostgreSQL store](durable-storage.md#a-shared-postgresql-store)
+  for engines on several hosts), and
 - the same durable backend location (for example one Qdrant server and
   `collection_prefix`).
 
@@ -35,7 +37,7 @@ that engine.
 | --- | --- |
 | Dense (Qdrant server, or another durable store) | Yes. One generation, built once. |
 | Keyword, fuzzy, sparse (in memory) | No. Each engine builds and keeps its own generation. |
-| Graph, structure | Only if every engine can open the same backend location. LadybugDB files and Qdrant local-mode directories are opened by one process at a time. |
+| Graph, structure | Only if every engine can open the same backend location. LadybugDB files and Qdrant local-mode directories are opened by one process at a time: a second process's `LadybugGraphStore` fails at startup with `BackendUnavailableError`. Share a graph through one owner process or a `GraphStoreABC` on a server database such as Neo4j. |
 
 Rows of an engine's in-memory generations carry its instance id. They are
 deleted when the engine closes, or by another engine's maintenance round when

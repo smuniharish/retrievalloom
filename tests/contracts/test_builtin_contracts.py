@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, ClassVar
 
 import pytest
 
+from retrievalloom.contracts.indexes import IndexCapabilities, WriteReport
+from retrievalloom.errors import GenerationError
 from retrievalloom.evidence.consolidation import HierarchicalConsolidator
 from retrievalloom.evidence.dedup import IdentityAndHashDeduplicator
 from retrievalloom.evidence.fusion import (
@@ -54,6 +56,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from retrievalloom.contracts.evidence import RankedEntry
+    from retrievalloom.contracts.indexes import IndexItem
+    from retrievalloom.domain.inputs import Scope
 
 
 # indexes ---------------------------------------------------------------------------------
@@ -65,6 +69,26 @@ class TestAhoCorasickKeywordIndex(SharedResources, KeywordIndexContract):
 class TestRapidFuzzIndex(SharedResources, FuzzyIndexContract):
     async def make_component(self, tmp_path: Path) -> RapidFuzzIndex:
         return RapidFuzzIndex()
+
+
+class SealOnceFuzzyIndex(RapidFuzzIndex):
+    """Immutable variant: exercises the kit's path for backends that reject sealed writes."""
+
+    @property
+    def capabilities(self) -> IndexCapabilities:
+        return IndexCapabilities(mutable_in_place=False, durable=False, filter_pushdown=True)
+
+    async def write(
+        self, scope: Scope, generation_id: str, items: Sequence[IndexItem]
+    ) -> WriteReport:
+        if self.generation(scope, generation_id).sealed:
+            raise GenerationError("generation is sealed")
+        return await super().write(scope, generation_id, items)
+
+
+class TestSealOnceFuzzyIndex(SharedResources, FuzzyIndexContract):
+    async def make_component(self, tmp_path: Path) -> SealOnceFuzzyIndex:
+        return SealOnceFuzzyIndex()
 
 
 class TestBM25sIndex(SharedResources, SparseIndexContract):

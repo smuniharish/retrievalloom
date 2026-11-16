@@ -83,4 +83,4 @@ print(status.tasks)  # {"succeeded": 2, "queued": 1}
 
 See [Index lifecycle](../concepts/lifecycle.md) for generations and coverage
 states, and the
-[lifecycle example](../../examples/lifecycle-backfill-rebuild.md).
+[document lifecycle example](../../examples/document-lifecycle.md).

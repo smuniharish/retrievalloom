@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field, model_validator
@@ -15,7 +16,6 @@ from retrievalloom.runtime.offloader import OffloaderConfig
 
 if TYPE_CHECKING:
     from concurrent.futures import Executor
-    from pathlib import Path
 
     from resourcera import ResourceManager
 
@@ -177,11 +177,22 @@ class FusionConfig(FrozenModel):
 
 
 class RerankingConfig(FrozenModel):
-    """Reranking (enabled by default; needs a reranker component)."""
+    """Reranking of the fused (RRF by default) candidate order.
+
+    When no reranker component is supplied, the engine wires the built-in FlashRank
+    cross-encoder, loading ``model_name`` from ``model_dir`` (default ``<data_dir>/models``,
+    or ``~/.cache/retrievalloom/models`` for in-memory engines). Models are never downloaded
+    unless ``allow_download`` is set; when the model is missing the default reranker is
+    dropped at startup (one ``reranker_unavailable`` log) and results keep the fused order.
+    A supplied reranker always replaces the default.
+    """
 
     enabled: bool = True
     rerank_k: int = Field(default=50, ge=1, le=1000)
     on_error: OnError = "degrade"
+    model_dir: Path | None = None
+    model_name: str = "ms-marco-TinyBERT-L-2-v2"
+    allow_download: bool = False
 
 
 class NLIConfig(FrozenModel):
@@ -257,9 +268,21 @@ class LifecycleConfig(FrozenModel):
         lease_ttl: Seconds a durable reader lease lives.
         generation_retention: Seconds a retired generation is kept before dropping.
         auto_rebuild_ephemeral: Rebuild ephemeral backends from metadata at
-            startup. Without ``background`` the rebuild completes before the
-            engine opens; with it, the rebuild runs in the background and
-            retrievals report ``index_missing`` until it finishes.
+            startup. Without ``background`` (or with ``wait_for_rebuild``) the
+            rebuild completes before the engine opens; otherwise it runs in the
+            background and retrievals report ``index_missing`` until it finishes.
+        wait_for_rebuild: With ``background``, still finish the startup rebuild
+            before the engine opens (bounded by ``rebuild_timeout``).
+        rebuild_timeout: Seconds a startup rebuild may block ``initialize`` when
+            ``background`` is on; on timeout the rebuild continues in the
+            background.
+        purge_after: Seconds a deleted document stays tombstoned before it is
+            physically erased by the background lifecycle; ``None`` disables.
+        max_versions: Version-history entries kept per document; older
+            unreferenced versions and their representations are pruned.
+            ``None`` disables.
+        event_retention: Seconds committed or failed ingestion events are kept;
+            ``None`` disables.
         migration: Metadata schema policy (``auto`` or ``verify``).
         shutdown_timeout: Seconds ``close`` waits for in-flight work.
     """
@@ -274,6 +297,11 @@ class LifecycleConfig(FrozenModel):
     lease_ttl: float = Field(default=120.0, gt=0)
     generation_retention: float = Field(default=0.0, ge=0)
     auto_rebuild_ephemeral: bool = True
+    wait_for_rebuild: bool = False
+    rebuild_timeout: float = Field(default=300.0, gt=0)
+    purge_after: float | None = Field(default=7 * 86_400.0, ge=0)
+    max_versions: int | None = Field(default=10, ge=1)
+    event_retention: float | None = Field(default=90 * 86_400.0, ge=0)
     migration: Literal["auto", "verify"] = "auto"
     shutdown_timeout: float = Field(default=30.0, gt=0)
 

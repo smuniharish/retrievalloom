@@ -19,7 +19,15 @@ Before the job starts:
    workload kind. If no capacity frees up within `admission_wait_timeout`
    (default 5 s), the call raises `ResourceAdmissionError`.
 
-Both permits are released when the thread finishes, not when the awaiting
+Between the two, the job also takes a slot of any engine-wide cap that
+applies to it: `OffloaderConfig.workload_limits[kind]` and, for CPU-bound
+kinds, `OffloaderConfig.max_cpu_jobs` (see
+[Capping CPU-bound jobs](#capping-cpu-bound-jobs)). Both are off by default.
+Slots are always taken in the same order (tenant, workload kind, CPU, then
+admission), and a job waiting for a slot waits on the event loop without
+holding an executor thread.
+
+All permits are released when the thread finishes, not when the awaiting
 coroutine stops. Cancelling a request or hitting its deadline therefore never
 over-commits capacity while the thread is still running. A `timeout` raises
 `OperationTimeoutError` but cannot stop the thread.
@@ -106,9 +114,59 @@ Separately from the offloader, `retrieve` limits concurrent requests per
 tenant with `TenantPolicy.max_concurrent_requests` (default 16). A request that
 cannot start before its deadline raises `OperationTimeoutError`.
 
+## Capping CPU-bound jobs
+
+A worker thread running pure-Python code holds the GIL. The event loop thread
+then waits for the GIL each time it wakes up, and the more such threads run at
+once, the longer it waits. Two `OffloaderConfig` settings bound how many jobs
+run at once, across all tenants:
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `max_cpu_jobs` | `None` (no cap) | At most this many jobs of CPU-bound kinds run at once. I/O-bound kinds (`IO_RETRIEVAL`, `GRAPH_QUERY`, `STRUCTURE_QUERY`) are not counted. |
+| `workload_limits` | `{}` | Per-kind caps, for example `{WorkloadKind.EMBEDDING: 1}` for a model that should not run twice in parallel. |
+
+```python
+from retrievalloom import create_retrieval_engine
+from retrievalloom.runtime.offloader import OffloaderConfig, WorkloadKind
+
+engine = create_retrieval_engine(
+    offloader=OffloaderConfig(max_cpu_jobs=2, workload_limits={WorkloadKind.EMBEDDING: 1})
+)
+```
+
+A capped job waits for its slot on the event loop, before admission, and
+releases it when its thread finishes, like the tenant slot. Cancellation and
+`timeout` behave as described above.
+
+Set a cap when your own components offload code that holds the GIL. Measured
+on the machine in [Benchmarks](../../benchmarks.md), 16 concurrent offloaded
+jobs of about 40 ms of pure-Python arithmetic each, 3 runs per setting:
+
+| `max_cpu_jobs` | Max event-loop lag | Total time |
+| --- | ---: | ---: |
+| `None` | 54–67 ms | 643–719 ms |
+| `2` | 37–62 ms | 574–630 ms |
+| `1` | 24–30 ms | 607–682 ms |
+
+Total time does not suffer, because the GIL serialises such jobs anyway.
+
+Leave the cap off for work that releases the GIL. The built-in fuzzy index
+scores with `rapidfuzz.process.cdist`, which releases the GIL while it runs
+(`process.extract` does not), and a BM25 query takes about 3 ms. For the default
+pipeline (2,000 documents, 16 concurrent retrievals), `max_cpu_jobs` of 1 or 2
+did not reduce the loop lag measurably and only cost throughput. The lag
+there comes from the garbage collector; see the next section.
+
 ## Event-loop pauses that offloading cannot prevent
 
 Python's garbage collector runs on whichever thread allocates, including the
 event loop thread. A full collection over a large heap, for example many
 loaded torch models, can pause the loop. See
 [Keep the event loop responsive](../how-to/event-loop-latency.md).
+
+With the default pipeline at 2,000 documents and 16 concurrent retrievals,
+the heap holds about 224,000 tracked objects and every full collection paused
+the loop for 60–80 ms; these pauses were the largest stalls measured. Calling
+`gc.collect()` and `gc.freeze()` once the engine has loaded its indexes cut the
+max loop lag from 122–153 ms to 21–29 ms over three runs.

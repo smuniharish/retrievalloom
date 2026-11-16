@@ -32,8 +32,9 @@ ingestion service, the lifecycle coordinator or the retrieval pipeline.
    `structure`). A unit fingerprints its backend and dependencies (tokenizer,
    keyword dictionary, embedding model).
 6. Start the lifecycle coordinator: register the engine instance and, with
-   `background=True`, start the scheduler. With `background=False` and
-   `auto_rebuild_ephemeral=True`, run one round before returning.
+   `background=True`, start the scheduler. With `auto_rebuild_ephemeral=True`
+   and either `background=False` or `wait_for_rebuild=True`, run one round
+   before returning (bounded by `rebuild_timeout` when the scheduler runs).
 
 If any step fails, everything started so far is closed and the error is
 raised.
@@ -58,7 +59,7 @@ raised.
 | `deduplicator` | `IdentityAndHashDeduplicator` | Always |
 | `consolidator` | `HierarchicalConsolidator` | Always |
 | `method_fusion`, `channel_fusion` | Built from `FusionConfig` (RRF, `k=60`) | Always |
-| `reranker` | None | Supply one, e.g. `FlashRankReranker` |
+| `reranker` | `FlashRankReranker` from `RerankingConfig` (`model_dir`, `model_name`); dropped at startup when the model files are missing | `RerankingConfig.enabled` |
 | `nli` | None | Supply one |
 | `cache` | `NoCache` | Always |
 | `access_policy` | `AllowAllAccessPolicy` | Always. Not a security control. |

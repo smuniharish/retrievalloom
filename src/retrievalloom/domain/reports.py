@@ -68,6 +68,20 @@ class DeleteReport(VersionedModel):
     task_ids: tuple[str, ...] = ()
 
 
+class PurgeReport(VersionedModel):
+    """Result of one ``purge`` call (physical erasure).
+
+    ``purged`` lists documents whose metadata rows and indexed objects were erased
+    (including documents that were already tombstoned); ``task_ids`` are rebuilds
+    queued for whole-scope units (graph) that still held the documents' contributions.
+    """
+
+    scope: Scope
+    purged: tuple[Identifier, ...] = ()
+    not_found: tuple[Identifier, ...] = ()
+    task_ids: tuple[str, ...] = ()
+
+
 class LifecycleTaskRef(FrozenModel):
     """Handle to a durable lifecycle task."""
 

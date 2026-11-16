@@ -132,6 +132,6 @@ Query vectors are cached per tenant in an LRU cache
 
 ## Real models
 
-The [BYO embeddings with Qdrant example](../../examples/byo-embeddings-qdrant.md)
-wires BAAI/bge-m3 through `transformers` to a Qdrant server. Use a server or a
+The [customer support example](../../examples/customer-support.md)
+wires BAAI/bge-m3 through `FlagEmbedding` (see [custom components](../../examples/adapters.md)) to a Qdrant server. Use a server or a
 persistent path for production data: see [Qdrant](../../integrations/qdrant.md).

@@ -47,6 +47,7 @@ dependencies = [
   "aiosqlite>=0.22.1,<1",
   "alembic>=1.20.1,<2",
   "bm25s>=0.3.16,<0.4",
+  "cachetools>=6,<8",
   "flashrank>=0.2.10,<0.3",
   "numpy>=2.2",
   "pydantic>=2.14.3,<3",
@@ -63,7 +64,10 @@ dependencies = [
 graph = ["ladybug>=0.22.3,<0.23"]
 structure = ["pytreesearch>=1.1.1,<2"]
 testing = ["pytest>=9.2.0", "pytest-asyncio>=1.4.1.post1"]
-all = ["retrievalloom[graph,structure]"]
+all = ["retrievalloom[graph,structure,postgres]"]
+postgres = [
+    "asyncpg>=0.30",
+]
 
 [project.urls]
 Homepage = "https://github.com/smuniharish/retrievalloom"
@@ -92,8 +96,16 @@ dev = [
   { include-group = "types" },
 ]
 examples = [
+    "asyncpg>=0.30",
+    "fastapi>=0.120",
+    "flagembedding>=1.4.2",
+    "httpx>=0.28",
+    "neo4j>=5.28",
+    "opentelemetry-exporter-otlp-proto-http>=1.30",
+    "opentelemetry-sdk>=1.30",
     "torch>=2.9",
     "transformers>=4.57",
+    "uvicorn>=0.38",
 ]
 
 [tool.uv]

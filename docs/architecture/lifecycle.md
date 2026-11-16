@@ -31,8 +31,11 @@ store. For the concepts (generations, coverage, tasks, leases), read
    - For per-document units, deleted documents are removed from the active
      generation.
    - A **full build** runs when there is a rebuild task, no pointer, a
-     fingerprint change, or pending work on a unit that cannot update in place.
-     Otherwise pending documents are applied **incrementally**.
+     fingerprint change, a keyword dictionary change (the
+     `keyword_entries_digest` stat of the active generation differs from the
+     digest of the current `GenerationSpec.keyword_entries`), or pending work
+     on a unit that cannot update in place. Otherwise pending documents are
+     applied **incrementally**.
 3. **Settling tasks.** Tasks whose units are covered succeed. A task whose
    units still fail after `max_attempts` rounds fails with "units did not
    reach coverage".
@@ -51,6 +54,40 @@ If the pointer moved in the meantime, the transaction fails and the new
 generation is marked `failed` and dropped. After a successful publish the
 indexer tries to retire the previous generation at once. Incremental updates
 commit coverage and visibility the same way, against the active generation.
+
+## In-place updates of the in-memory indexes
+
+The default keyword (`AhoCorasickKeywordIndex`), fuzzy (`RapidFuzzIndex`) and
+sparse (`BM25sIndex`) indexes share `InMemoryGenerationalIndex`
+(`index/memory.py`) and declare `mutable_in_place=True`. None of ahocorasick-rs,
+RapidFuzz or bm25s has an incremental API, so the libraries are used for
+matching and scoring only, and each index keeps its own postings:
+
+- Before `seal`, writes are staged and built in one offloaded pass.
+- After `seal`, a write is analysed in the offloader (automaton scan,
+  term counts) and then applied on the event loop without awaiting: the
+  objects it replaces are deleted, the new ones inserted. `remove` deletes
+  objects the same way. Both cost time proportional to the changed objects.
+  A per-generation lock serialises changes; searches never see a
+  half-applied change.
+- After any change the structure equals a fresh build over the live objects,
+  so search results do not depend on the update history:
+  - keyword: canonical-keyword postings; `N` and `df` count live objects;
+  - fuzzy: term postings plus a sorted vocabulary that is re-merged from the
+    added and removed terms on the next search (a new list, so a running
+    match keeps its own);
+  - sparse: term-frequency postings over object slots. `N`, document
+    frequencies and the average length of the live objects are applied with
+    bm25s's idf and term-frequency functions at query time, so scores equal a
+    fresh bm25s index up to bm25s's float32 rounding. Removal marks a slot
+    dead; once dead slots outnumber live ones (and are at least 1,024), a
+    compacted copy is built in the offloader and swapped in.
+
+The generation is fixed to the keyword dictionary it was built with
+(`GenerationSpec.keyword_entries`). A full build stores the dictionary's
+digest in the generation's `keyword_entries_digest` stat; when the current
+dictionary has another digest, the indexer builds a new generation instead of
+updating in place.
 
 ## Maintenance
 

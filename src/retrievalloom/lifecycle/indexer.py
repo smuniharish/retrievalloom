@@ -22,6 +22,7 @@ from retrievalloom.domain.records import (
     TaskKind,
     TaskState,
 )
+from retrievalloom.lifecycle.units import DICTIONARY_DIGEST, dictionary_digest
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -126,8 +127,9 @@ class UnitIndexer:
     """Brings one scope's index units up to date with the metadata store.
 
     Per-document units with in-place mutable backends are updated incrementally; every
-    other change (immutable backends, the graph, dependency changes, rebuild requests)
-    produces a new generation built from the metadata store, published by pointer CAS.
+    other change (immutable backends, the graph, dependency or keyword dictionary
+    changes, rebuild requests) produces a new generation built from the metadata store,
+    published by pointer CAS.
     """
 
     def __init__(
@@ -182,10 +184,14 @@ class UnitIndexer:
             and unit.name not in rebuilt_units(task)
         ]
 
+    def lock(self, scope: Scope, unit: IndexUnit) -> asyncio.Lock:
+        """The in-process lock serialising work on ``unit`` in ``scope``."""
+        return self._locks[(scope.key, f"{unit.name}:{unit.instance}")]
+
     # run ------------------------------------------------------------------------------
     async def run(self, scope: Scope, unit: IndexUnit) -> None:
         """Process all outstanding work of ``unit`` in ``scope``."""
-        async with self._locks[(scope.key, f"{unit.name}:{unit.instance}")]:
+        async with self.lock(scope, unit):
             key = unit.key(scope)
             await self._create_missing_coverage(scope, unit)
             async with self._store.transaction(scope, write=False) as transaction:
@@ -204,6 +210,7 @@ class UnitIndexer:
                 or generation is None
                 or generation.dependency_fingerprint != unit.fingerprint
                 or (not unit.incremental and await self._has_pending(scope, unit))
+                or not await self._same_dictionary(scope, unit, generation)
             )
             if full:
                 await self._full_build(scope, unit, pointer)
@@ -214,6 +221,17 @@ class UnitIndexer:
     async def _has_pending(self, scope: Scope, unit: IndexUnit) -> bool:
         async with self._store.transaction(scope, write=False) as transaction:
             return bool(await transaction.list_coverage(unit.key(scope), _WORK_STATES, limit=1))
+
+    async def _same_dictionary(
+        self, scope: Scope, unit: IndexUnit, generation: IndexGeneration
+    ) -> bool:
+        """Whether the keyword dictionary still equals the one ``generation`` was built with.
+
+        A dictionary change (e.g. new keywords in document metadata) affects objects that
+        did not change, so it needs a full build rather than an in-place update.
+        """
+        spec = await self._preparer.spec(unit, scope, generation.generation_id)
+        return generation.stats.get(DICTIONARY_DIGEST) == dictionary_digest(spec)
 
     async def _create_missing_coverage(self, scope: Scope, unit: IndexUnit) -> None:
         key = unit.key(scope)
@@ -240,6 +258,8 @@ class UnitIndexer:
                         for document in missing
                     ]
                 )
+            if len(missing) < self._config.batch_size:
+                return
 
     async def _remove_deleted(self, scope: Scope, unit: IndexUnit, generation_id: str) -> None:
         """Remove every object of deleted documents from the active generation."""
@@ -256,13 +276,10 @@ class UnitIndexer:
                     if (document := documents.get(row.document_uid)) is None
                     or document.state == DocumentState.DELETED
                 ][: self._config.batch_size]
-                object_ids = [
-                    obj.object_id
-                    for row in deleted
-                    for obj in await transaction.list_document_objects(
-                        scope.key, row.document_uid, kinds=unit.kinds
-                    )
-                ]
+                listed = await transaction.list_objects_for_documents(
+                    scope.key, [(row.document_uid, None) for row in deleted], unit.kinds
+                )
+                object_ids = [obj.object_id for row in deleted for obj in listed[row.document_uid]]
             if not deleted:
                 return
             if object_ids:
@@ -282,9 +299,10 @@ class UnitIndexer:
                             }
                         )
                         for row in deleted
-                        # A document revived meanwhile stays pending.
-                        if (document := current.get(row.document_uid)) is None
-                        or document.state == DocumentState.DELETED
+                        # A document revived meanwhile stays pending; one purged meanwhile
+                        # has no rows left, and writing one back would undo the purge.
+                        if (document := current.get(row.document_uid)) is not None
+                        and document.state == DocumentState.DELETED
                     ]
                 )
 
@@ -319,11 +337,13 @@ class UnitIndexer:
             watermark=watermark,
         )
         try:
-            await unit.backend.create_generation(
-                scope, await self._preparer.spec(unit, scope, generation_id)
-            )
+            spec = await self._preparer.spec(unit, scope, generation_id)
+            await unit.backend.create_generation(scope, spec)
             included = await self._write_all(scope, unit, generation_id)
             stats = await unit.backend.seal(scope, generation_id)
+            details = stats.model_dump(mode="json")
+            if (digest := dictionary_digest(spec)) is not None:
+                details[DICTIONARY_DIGEST] = digest
             retired = await self._publish(
                 scope,
                 unit,
@@ -331,7 +351,7 @@ class UnitIndexer:
                 pointer,
                 watermark,
                 included,
-                stats.model_dump(mode="json"),
+                details,
                 rebuild_tasks,
             )
         except BaseException as exc:
@@ -425,15 +445,14 @@ class UnitIndexer:
                     key, [document.document_uid for document in documents]
                 )
                 updates: list[CoverageRecord] = []
+                ready: list[tuple[str, int]] = []
                 for document in documents:
                     row = coverage.get(document.document_uid)
                     state = self._published_state(document, included, watermark)
                     if state is None:
                         continue
                     if state == CoverageState.READY:
-                        await transaction.open_visibility(
-                            key, document.document_uid, document.version, seq
-                        )
+                        ready.append((document.document_uid, document.version))
                     updates.append(
                         CoverageRecord(
                             scope_key=scope.key,
@@ -456,6 +475,7 @@ class UnitIndexer:
                             row_revision=0 if row is None else row.row_revision,
                         )
                     )
+                await transaction.open_visibility_many(key, ready, seq)
                 await transaction.upsert_coverage(updates)
             for task_id in rebuild_tasks:
                 task = await transaction.get_task(task_id)
@@ -532,19 +552,30 @@ class UnitIndexer:
                 documents = await transaction.get_documents_by_uid(
                     scope.key, [row.document_uid for row in rows]
                 )
-                work: list[tuple[CoverageRecord, DocumentRecord, list[DerivedObject]]] = []
-                for row in rows:
-                    document = documents.get(row.document_uid)
-                    if document is None or document.state != DocumentState.ACTIVE:
-                        continue  # deleted meanwhile; handled by the next round
-                    objects = [
-                        obj
-                        for obj in await transaction.list_document_objects(
-                            scope.key, document.document_uid, document.version, unit.kinds
-                        )
-                        if obj.state == ObjectState.LIVE
-                    ]
-                    work.append((row, document, objects))
+                active = [
+                    (row, document)
+                    for row in rows
+                    if (document := documents.get(row.document_uid)) is not None
+                    # Documents deleted meanwhile are handled by the next round.
+                    and document.state == DocumentState.ACTIVE
+                ]
+                found = await transaction.list_objects_for_documents(
+                    scope.key,
+                    [(document.document_uid, document.version) for _, document in active],
+                    unit.kinds,
+                )
+                work: list[tuple[CoverageRecord, DocumentRecord, list[DerivedObject]]] = [
+                    (
+                        row,
+                        document,
+                        [
+                            obj
+                            for obj in found[document.document_uid]
+                            if obj.state == ObjectState.LIVE
+                        ],
+                    )
+                    for row, document in active
+                ]
             if not work:
                 return
             try:
@@ -575,11 +606,12 @@ class UnitIndexer:
             )
             seq = await transaction.next_commit_seq()
             updates: list[CoverageRecord] = []
+            published: list[DocumentRecord] = []
             for row, document, objects in work:
                 latest = current.get(document.document_uid)
                 if latest is None or latest.change_seq != document.change_seq:
                     continue  # changed while writing; stays pending for the next pass
-                await transaction.open_visibility(key, document.document_uid, document.version, seq)
+                published.append(document)
                 state = CoverageState.READY if objects else CoverageState.NOT_APPLICABLE
                 updates.append(
                     row.model_copy(
@@ -596,11 +628,16 @@ class UnitIndexer:
                         }
                     )
                 )
+            await transaction.open_visibility_many(
+                key, [(document.document_uid, document.version) for document in published], seq
+            )
+            versions = await transaction.list_objects_for_documents(
+                scope.key, [(document.document_uid, None) for document in published], unit.kinds
+            )
+            for document in published:
                 stale.extend(
                     obj.object_id
-                    for obj in await transaction.list_document_objects(
-                        scope.key, document.document_uid, kinds=unit.kinds
-                    )
+                    for obj in versions[document.document_uid]
                     if obj.version != document.version
                 )
             await transaction.upsert_coverage(updates)
@@ -668,6 +705,10 @@ class UnitIndexer:
 
     async def reconcile(self, scope: Scope, unit: IndexUnit) -> None:
         """Drop retired, abandoned and orphaned generations of ``unit``."""
+        async with self.lock(scope, unit):
+            await self._reconcile(scope, unit)
+
+    async def _reconcile(self, scope: Scope, unit: IndexUnit) -> None:
         instances = [unit.instance or None]
         async with self._store.transaction(scope, write=False) as transaction:
             generations = [
@@ -687,6 +728,12 @@ class UnitIndexer:
         live = {GenerationState.BUILDING, GenerationState.ACTIVE, GenerationState.RETIRING}
         for generation_id in await unit.backend.list_generations(scope):
             state = known.get(generation_id)
+            if state is None:
+                # Another engine may have registered it after the listing above; its
+                # metadata row is always written before the backend generation.
+                async with self._store.transaction(scope, write=False) as transaction:
+                    fresh = await transaction.get_generation(generation_id)
+                state = None if fresh is None else fresh.state
             if state is None or state not in live:
                 await unit.backend.drop_generation(scope, generation_id)
                 self._logger.info(

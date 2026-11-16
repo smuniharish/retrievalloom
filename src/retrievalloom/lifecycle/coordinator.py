@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from refresh_engine import (
@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     from retrievalloom.domain.base import Clock
     from retrievalloom.domain.inputs import Scope
     from retrievalloom.lifecycle.indexer import UnitIndexer
+    from retrievalloom.lifecycle.purge import DocumentEraser
     from retrievalloom.lifecycle.units import IndexUnit
     from retrievalloom.storage.base import DocumentMetadataStoreABC
 
@@ -64,6 +65,7 @@ RETRYABLE = (
 )
 _TERMINAL = {TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED}
 _STATE_NAMESPACE = "lifecycle"
+_HOUSEKEEPING_INTERVAL = timedelta(minutes=5)
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +123,7 @@ class LifecycleCoordinator:
         engine_id: str,
         clock: Clock,
         logger: Any,
+        eraser: DocumentEraser | None = None,
     ) -> None:
         self._store = store
         self._indexer = indexer
@@ -130,7 +133,9 @@ class LifecycleCoordinator:
         self._engine_id = engine_id
         self._clock = clock
         self._logger = logger
+        self._eraser = eraser
         self._started_at = clock()
+        self._housekept_at = datetime.min.replace(tzinfo=UTC)
         self._targets: dict[str, _Target] = {}
         self._scheduler: AsyncScheduler | None = None
         self._kicked: asyncio.Task[None] | None = None
@@ -200,8 +205,8 @@ class LifecycleCoordinator:
             )
         return result
 
-    async def maintain(self) -> None:
-        """Heartbeat this instance and reconcile generations of every scope."""
+    async def maintain(self, *, housekeeping: bool = True) -> None:
+        """Heartbeat this instance, reconcile generations and (optionally) housekeep."""
         now = self._clock()
         async with self._store.transaction(write=True) as transaction:
             await transaction.heartbeat_instance(
@@ -224,18 +229,81 @@ class LifecycleCoordinator:
             async with self._store.transaction(write=True) as transaction:
                 await transaction.purge_instance(instance)
             self._logger.info("engine_instance_purged", instance_id=instance)
+        if not housekeeping:
+            return
+        self._housekept_at = now
+        for scope in scopes:
+            await self.housekeep(scope)
+
+    async def housekeep(self, scope: Scope) -> None:
+        """Purge expired tombstones and prune version history and events of ``scope``.
+
+        Failures are logged and retried on the next maintenance round.
+        """
+        config = self._config
+        now = self._clock()
+        try:
+            if self._eraser is not None and config.purge_after is not None:
+                await self._eraser.purge_expired(
+                    scope,
+                    deleted_before=now - timedelta(seconds=config.purge_after),
+                    limit=config.batch_size,
+                )
+            versions = 0
+            events = 0
+            while config.max_versions is not None:
+                async with self._store.transaction(scope, write=True) as transaction:
+                    pruned = await transaction.prune_versions(
+                        scope.key, keep=config.max_versions, limit=config.batch_size
+                    )
+                versions += pruned
+                if pruned < config.batch_size:
+                    break
+            while config.event_retention is not None:
+                async with self._store.transaction(scope, write=True) as transaction:
+                    pruned = await transaction.prune_events(
+                        scope.key,
+                        before=now - timedelta(seconds=config.event_retention),
+                        limit=config.batch_size,
+                    )
+                events += pruned
+                if pruned < config.batch_size:
+                    break
+        except Exception as exc:
+            self._logger.error(
+                "lifecycle_housekeeping_failed", scope=scope.key, error_type=type(exc).__name__
+            )
+            return
+        if versions or events:
+            self._logger.info("history_pruned", scope=scope.key, versions=versions, events=events)
 
     async def tick(self) -> None:
         """One background round: maintenance, then indexing."""
         try:
-            await self.maintain()
+            due = self._clock() - self._housekept_at >= _HOUSEKEEPING_INTERVAL
+            await self.maintain(housekeeping=due)
             await self.run_once()
         except Exception as exc:
             self._logger.error("lifecycle_tick_failed", error_type=type(exc).__name__)
 
-    async def start(self) -> None:
-        """Register the instance and start the background scheduler when enabled."""
+    async def start(self, *, rebuild: bool = False, rebuild_timeout: float | None = None) -> None:
+        """Register the instance and start the background scheduler when enabled.
+
+        With ``rebuild`` one lifecycle round runs before the scheduler starts, so
+        ephemeral backends are rebuilt when this returns. ``rebuild_timeout`` bounds
+        that round; on timeout the remaining work is left to the background rounds.
+        A failed round stops the coordinator and re-raises.
+        """
         await self.maintain()
+        if rebuild:
+            try:
+                async with asyncio.timeout(rebuild_timeout):
+                    await self.run_once()
+            except TimeoutError:
+                self._logger.warning("startup_rebuild_timeout", timeout=rebuild_timeout)
+            except BaseException:
+                await self.stop()
+                raise
         if self._config.background:
             self._scheduler = AsyncScheduler(
                 self.tick, self._config.poll_interval, run_immediately=True

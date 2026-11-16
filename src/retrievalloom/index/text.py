@@ -14,12 +14,13 @@ from retrievalloom.domain.records import DocumentState
 from retrievalloom.errors import ConfigurationError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     from retrievalloom.contracts.component import ComponentContext
     from retrievalloom.domain.inputs import Scope
 
 _WORD = re.compile(r"\w+", re.UNICODE)
+_PAGE = 5000
 
 
 def fold(text: str) -> str:
@@ -137,19 +138,19 @@ class MetadataKeywordDictionary(KeywordDictionaryABC):
             after: str | None = None
             while True:
                 async with self._store.transaction(scope, write=False) as tx:
-                    page = await tx.list_documents(
-                        scope.key, state=DocumentState.ACTIVE, after_id=after, limit=500
+                    page = await tx.list_document_metadata(
+                        scope.key, state=DocumentState.ACTIVE, after_id=after, limit=_PAGE
                     )
-                for document in page:
-                    for value in _strings(document.metadata, self._fields):
+                for _, metadata in page:
+                    for value in _strings(metadata, self._fields):
                         terms.setdefault(fold(value), KeywordEntry(canonical=value))
-                if len(page) < 500:
+                if len(page) < _PAGE:
                     break
-                after = page[-1].document_id
+                after = page[-1][0]
         return [terms[key] for key in sorted(terms)]
 
 
-def _strings(metadata: dict[str, object], fields: Sequence[str]) -> list[str]:
+def _strings(metadata: Mapping[str, object], fields: Sequence[str]) -> list[str]:
     found: list[str] = []
     for name in fields:
         value = metadata.get(name)

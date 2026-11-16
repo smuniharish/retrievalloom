@@ -1,0 +1,72 @@
+[
+  {
+    "id": "sync-conflicts",
+    "product": "acmesync",
+    "language": "en",
+    "title": "Resolving sync conflicts",
+    "text": "When the same file is edited on two devices before AcmeSync uploads the first change, the desktop client keeps both versions. The later copy is renamed with the suffix 'conflicted copy' and the device name. Open both files, merge the edits you want to keep and delete the conflicted copy; AcmeSync uploads the merged file on the next sync cycle."
+  },
+  {
+    "id": "sync-selective",
+    "product": "acmesync",
+    "language": "en",
+    "title": "Selective sync for large folders",
+    "text": "Selective sync lets you choose which shared folders are downloaded to a laptop. Right-click the AcmeSync tray icon, open Preferences, then Folders, and untick the folders you only need in the browser. Unticked folders stay in the cloud and free local disk space immediately."
+  },
+  {
+    "id": "sync-proxy",
+    "product": "acmesync",
+    "language": "en",
+    "title": "Using AcmeSync behind a corporate proxy",
+    "text": "If the client shows 'connection lost' while the browser works, the network probably requires a proxy. In Preferences, Network, choose Manual proxy, enter the host and port supplied by your IT team and, if required, the proxy user name. AcmeSync supports HTTP and SOCKS5 proxies but not PAC files."
+  },
+  {
+    "id": "sync-konflikte",
+    "product": "acmesync",
+    "language": "de",
+    "title": "Synchronisationskonflikte lösen",
+    "text": "Wird dieselbe Datei auf zwei Geräten bearbeitet, bevor AcmeSync die erste Änderung hochlädt, behält der Client beide Fassungen. Die spätere Kopie erhält den Zusatz 'Konfliktkopie' und den Gerätenamen. Führen Sie die Änderungen zusammen und löschen Sie anschließend die Konfliktkopie."
+  },
+  {
+    "id": "sync-2fa",
+    "product": "acmesync",
+    "language": "en",
+    "title": "Two-factor authentication on new devices",
+    "text": "After you enable two-factor authentication, every new device asks for a six-digit code from your authenticator app. Lost your phone? Use one of the ten recovery codes you downloaded during setup, then register the new phone under Account, Security."
+  },
+  {
+    "id": "pay-refund",
+    "product": "acmepay",
+    "language": "en",
+    "title": "Refunding a customer payment",
+    "text": "To refund a payment, open the invoice in AcmePay, choose Refund and enter the amount. Card refunds reach the customer within five to ten business days; bank transfer refunds are sent with the next payout run. Partial refunds can be issued several times until the invoice total is reached."
+  },
+  {
+    "id": "pay-failed-card",
+    "product": "acmepay",
+    "language": "en",
+    "title": "Why a card payment was declined",
+    "text": "A declined card payment usually means the issuing bank rejected the charge: insufficient funds, an expired card or a failed 3-D Secure check. AcmePay shows the decline code on the payment timeline. Ask the customer to retry with another card or to contact their bank; repeated retries with the same card are blocked for 24 hours."
+  },
+  {
+    "id": "pay-invoice-numbering",
+    "product": "acmepay",
+    "language": "en",
+    "title": "Custom invoice numbering",
+    "text": "Invoice numbers follow the pattern you set under Settings, Invoicing, Numbering. Use the placeholders {YYYY} for the year and {SEQ} for a sequence that restarts every January. Changing the pattern only affects invoices created afterwards; existing invoice numbers never change because they are legally binding."
+  },
+  {
+    "id": "pay-erstattung",
+    "product": "acmepay",
+    "language": "de",
+    "title": "Zahlungen erstatten",
+    "text": "Um eine Zahlung zu erstatten, öffnen Sie die Rechnung in AcmePay, wählen Erstatten und geben den Betrag ein. Kartenerstattungen erreichen den Kunden innerhalb von fünf bis zehn Werktagen, Überweisungen mit dem nächsten Auszahlungslauf."
+  },
+  {
+    "id": "pay-webhooks",
+    "product": "acmepay",
+    "language": "en",
+    "title": "Receiving payment webhooks",
+    "text": "AcmePay sends a signed webhook for every payment event. Verify the signature header with your webhook secret before trusting the body, answer with HTTP 200 within ten seconds and process the event asynchronously. Unacknowledged webhooks are retried with exponential backoff for three days."
+  }
+]

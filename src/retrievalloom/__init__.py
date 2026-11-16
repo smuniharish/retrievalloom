@@ -7,6 +7,7 @@ Extension contracts (ABCs) live in :mod:`retrievalloom.contracts`; default adapt
 """
 
 from importlib.metadata import PackageNotFoundError, version
+from typing import TYPE_CHECKING, Any
 
 from retrievalloom.config import (
     ChannelsConfig,
@@ -53,6 +54,7 @@ from retrievalloom.domain.reports import (
     IngestReport,
     LifecycleTaskRef,
     LifecycleTaskResult,
+    PurgeReport,
     ScopeStatus,
 )
 from retrievalloom.domain.retrieval import (
@@ -89,6 +91,9 @@ from retrievalloom.errors import (
     ValidationError,
 )
 from retrievalloom.runtime.offloader import OffloaderConfig
+
+if TYPE_CHECKING:
+    from retrievalloom.storage.postgres import PostgresMetadataStore
 
 try:
     __version__ = version("retrievalloom")
@@ -151,7 +156,9 @@ __all__ = [
     "OperationCancelledError",
     "OperationTimeoutError",
     "Or",
+    "PostgresMetadataStore",
     "ProvenanceError",
+    "PurgeReport",
     "Range",
     "RerankingConfig",
     "ResourceAdmissionError",
@@ -179,3 +186,12 @@ __all__ = [
     "__version__",
     "create_retrieval_engine",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    # Optional backends are imported on first use so ``import retrievalloom`` stays light.
+    if name == "PostgresMetadataStore":
+        from retrievalloom.storage.postgres import PostgresMetadataStore
+
+        return PostgresMetadataStore
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

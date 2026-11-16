@@ -40,9 +40,11 @@ from retrievalloom.domain.records import (
 from retrievalloom.domain.retrieval import WarningCode
 from retrievalloom.errors import BackendUnavailableError, ValidationError, VersionConflictError
 from retrievalloom.graph.normalizer import IdentityGraphNormalizer
+from retrievalloom.lifecycle import ingestion
 from retrievalloom.lifecycle.canonical import canonicalize, document_uid
 from retrievalloom.lifecycle.ingestion import GraphDerivation, IngestionService
 from retrievalloom.storage.base import UnitKey
+from retrievalloom.storage.sqlite import SQLiteTransaction
 from tests.fakes import CapitalizedExtractor
 from tests.unit.lifecycle.helpers import (
     OTHER,
@@ -55,6 +57,8 @@ from tests.unit.lifecycle.helpers import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from retrievalloom.domain.records import DerivedObject
     from retrievalloom.storage.sqlite import SQLiteMetadataStore
 
@@ -294,7 +298,7 @@ async def test_version_conflicts_are_retried(
     store: SQLiteMetadataStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls = fail_transaction(
-        monkeypatch, "put_document", lambda: VersionConflictError("busy"), times=2
+        monkeypatch, "put_documents", lambda: VersionConflictError("busy"), times=2
     )
     [result] = (await service(store).ingest([text_doc("d1", "x")], SCOPE)).documents
     assert calls[0] == 3
@@ -304,7 +308,7 @@ async def test_version_conflicts_are_retried(
 async def test_exhausted_version_conflicts_fail_the_document(
     store: SQLiteMetadataStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fail_transaction(monkeypatch, "put_document", lambda: VersionConflictError("busy"))
+    fail_transaction(monkeypatch, "put_documents", lambda: VersionConflictError("busy"))
     logger = RecordingLogger()
     ingest = IngestionService(store, IngestionConfig(), clock=FakeClock(), logger=logger)
     [result] = (await ingest.ingest([text_doc("d1", "x")], SCOPE)).documents
@@ -322,13 +326,95 @@ async def test_exhausted_version_conflicts_fail_the_document(
 async def test_unexpected_errors_propagate_and_roll_back(
     store: SQLiteMetadataStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fail_transaction(monkeypatch, "put_event", lambda: RuntimeError("disk on fire"))
+    fail_transaction(monkeypatch, "put_events", lambda: RuntimeError("disk on fire"))
     with pytest.raises(ExceptionGroup) as caught:
         await service(store).ingest([text_doc("d1", "x")], SCOPE)
     assert caught.group_contains(RuntimeError)
     monkeypatch.undo()
     assert await document(store, "d1") is None
     assert await objects_of(store, "d1") == []
+
+
+async def test_documents_are_written_in_chunk_transactions(
+    store: SQLiteMetadataStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ingestion, "_WRITE_CHUNK", 2)
+    writes = fail_transaction(monkeypatch, "put_documents", RuntimeError, times=0)
+    ingest = service(store)
+    first = await ingest.ingest(
+        [text_doc(f"d{n}", "x", appearance_id=f"a{n}") for n in range(5)], SCOPE
+    )
+    assert writes[0] == 3
+    assert {result.outcome for result in first.documents} == {IngestOutcome.CREATED}
+    again = await ingest.ingest(
+        [
+            text_doc("d0", "x", appearance_id="a0"),
+            text_doc("d1", "x", appearance_id="a1"),
+            text_doc("d2", "x", appearance_id="a2"),
+            text_doc("d5", "x", appearance_id="a5"),
+        ],
+        SCOPE,
+    )
+    # The first chunk only replays, so it writes nothing.
+    assert writes[0] == 4
+    assert [(result.document_id, result.outcome) for result in again.documents] == [
+        ("d0", IngestOutcome.REPLAYED),
+        ("d1", IngestOutcome.REPLAYED),
+        ("d2", IngestOutcome.REPLAYED),
+        ("d5", IngestOutcome.CREATED),
+    ]
+    assert [result.counter for result in again.documents] == [1, 1, 1, 1]
+
+
+async def test_failing_document_does_not_fail_its_chunk(
+    store: SQLiteMetadataStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bad = document_uid(SCOPE, "bad")
+    original = SQLiteTransaction.put_objects
+
+    async def put_objects(self: SQLiteTransaction, objects: Sequence[DerivedObject]) -> None:
+        if any(obj.document_uid == bad for obj in objects):
+            raise ValidationError("unstorable object")
+        await original(self, objects)
+
+    monkeypatch.setattr(SQLiteTransaction, "put_objects", put_objects)
+    logger = RecordingLogger()
+    ingest = IngestionService(store, IngestionConfig(), clock=FakeClock(), logger=logger)
+    report = await ingest.ingest(
+        [text_doc("good-1", "x"), text_doc("bad", "y"), text_doc("good-2", "z")], SCOPE
+    )
+    assert [(result.document_id, result.outcome) for result in report.documents] == [
+        ("good-1", IngestOutcome.CREATED),
+        ("bad", IngestOutcome.FAILED),
+        ("good-2", IngestOutcome.CREATED),
+    ]
+    events = [(level, name) for level, name, _ in logger.records]
+    assert ("debug", "ingest_chunk_split") in events
+    assert ("warning", "ingest_failed") in events
+    assert await document(store, "bad") is None
+    assert [len(await objects_of(store, name)) for name in ("good-1", "good-2")] == [1, 1]
+
+
+async def test_chunk_conflicts_are_retried_per_document(
+    store: SQLiteMetadataStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = fail_transaction(
+        monkeypatch, "put_documents", lambda: VersionConflictError("busy"), times=1
+    )
+    report = await service(store).ingest([text_doc("d1", "x"), text_doc("d2", "y")], SCOPE)
+    assert calls[0] == 3
+    assert [result.outcome for result in report.documents] == [IngestOutcome.CREATED] * 2
+
+
+async def test_unexpected_chunk_errors_roll_back_the_whole_chunk(
+    store: SQLiteMetadataStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fail_transaction(monkeypatch, "put_events", lambda: RuntimeError("disk on fire"))
+    with pytest.raises(ExceptionGroup) as caught:
+        await service(store).ingest([text_doc("d1", "x"), text_doc("d2", "y")], SCOPE)
+    assert caught.group_contains(RuntimeError, match="disk on fire")
+    monkeypatch.undo()
+    assert [await document(store, name) for name in ("d1", "d2")] == [None, None]
 
 
 # delete ---------------------------------------------------------------------------------

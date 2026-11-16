@@ -21,8 +21,9 @@ decide.
   (Cypher) queries pass values as bound parameters. The only interpolated
   values are validated integers and enumerations.
 - **Access policy hook.** Every engine operation (`ingest`, `retrieve`,
-  `delete`, `backfill`, `rebuild`, `status`) is first authorized by the
-  configured `AccessPolicyABC`. A denial raises `AccessDeniedError`. The
+  `delete`, `purge`, `backfill`, `rebuild`, `status`) is first authorized by the
+  configured `AccessPolicyABC` (`purge` uses the `delete` action). A denial
+  raises `AccessDeniedError`. The
   policy's `row_filter` is combined with the request's own filters before
   retrieval, and it is part of the result cache key, so principals with
   different row filters never share cached results.
@@ -45,11 +46,44 @@ decide.
 | --- | --- |
 | Authorization | The default `AllowAllAccessPolicy` is **not** a security control: any caller that can reach the engine can use any scope. Authenticate callers in your application, pass their identity as `principal`, and supply an `AccessPolicyABC` that enforces your rules. |
 | Scope choice | Derive the `Scope` from the authenticated identity, never from unvalidated request input. |
-| Storage | Restrict access to the SQLite file, the Qdrant collections, and the graph and structure directories. Encrypt them at rest, and apply your retention period. `delete` hides a document from retrieval immediately, and the index lifecycle then removes its index entries. The metadata store keeps the document's versions and representations as a tombstone, and there is no hard-erase operation yet, so meet erasure obligations at the storage layer. |
+| Storage | Restrict access to the SQLite file, the Qdrant collections, and the graph and structure directories. Encrypt them at rest. See [Erasure and retention](#erasure-and-retention) for how stored data is removed. |
 | Qdrant | Run Qdrant with an API key and TLS when it is reachable over a network. Load the key from a secret store, never from source control. |
 | Models | Embedding, reranker, and NLI models run in your process. Use weights from sources you trust, pin their revisions, and provision them ahead of time. |
 | Logs | Keep `log_content` off in production unless your log pipeline is approved for document and query content. |
 | Dependencies | Install only the extras you use, and pin versions in your application. |
+
+## Erasure and retention
+
+- **`delete` is a tombstone.** It hides a document from retrieval at once, and
+  the index lifecycle then removes its index entries. The metadata store keeps
+  its versions, representations, events and objects.
+- **`purge` erases.** `await engine.purge(ids, scope=..., principal=...)`
+  removes the documents' objects from every generation of this engine's
+  indexes, then deletes every metadata row of the documents in one
+  transaction per document. It never reports a document as purged while a
+  backend removal failed: on a backend error nothing is deleted from the
+  metadata store and the call raises, so it can be retried. It is idempotent.
+- **Tombstones expire.** Maintenance erases deleted documents the same way
+  after `LifecycleConfig.purge_after` (default 7 days), once every index unit
+  has removed them.
+- **History is bounded.** `max_versions` (default 10) caps each document's
+  version history and `event_retention` (default 90 days) caps ingestion
+  events. Set them to match your retention policy.
+
+Limits to plan for:
+
+- Other engines' in-memory (ephemeral) indexes keep purged entries until they
+  restart or rebuild. Retrieval never returns them, because evidence is
+  hydrated from the metadata store, but the data stays in their process
+  memory. Restart them or run `rebuild` there when erasure must be complete.
+- A graph aggregate that other documents still support stays in the active
+  graph generation until the queued graph rebuild publishes a new one. Wait
+  for the task ids in `PurgeReport.task_ids`.
+- Backups, SQLite WAL files and freed database pages can still contain erased
+  data. Rotate backups, and run `VACUUM` on the SQLite file when erased bytes
+  must leave the disk.
+- Erasure covers what RetrievalLoom stores. Provenance recorders, caches you
+  supply, and logs with `log_content=True` are outside it.
 
 ## Reporting a vulnerability
 

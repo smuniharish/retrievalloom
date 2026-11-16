@@ -24,17 +24,36 @@ with `asyncio.run_coroutine_threadsafe`.
 | Requests per tenant | `TenantPolicy.max_concurrent_requests` (16) | Extra requests wait for a slot until their deadline, then raise `OperationTimeoutError`. |
 | Offloaded jobs per tenant | `TenantPolicy.max_concurrent_cpu_jobs` (4) | Extra jobs wait for a slot. |
 | Offloaded jobs overall | `OffloaderConfig.max_workers` (8) and resourcera admission | Jobs wait for capacity up to `admission_wait_timeout`, then raise `ResourceAdmissionError`. |
+| CPU-bound offloaded jobs overall | `OffloaderConfig.max_cpu_jobs` (no cap) and `workload_limits` (none) | Jobs over the cap wait on the loop for a slot. Bounds GIL contention from code that holds the GIL. |
 | Units per lifecycle round | `LifecycleConfig.max_concurrency` (4) | Bounds parallel indexing. |
 | Request duration | `request_timeout`, `method_timeout` | See [Keep the event loop responsive](../guide/how-to/event-loop-latency.md). |
 
 Per-tenant overrides go in `RetrievalConfig.tenant_policies`.
 
+## Event-loop lag under load
+
+Worker threads and the loop thread share the GIL, so offloading alone does not
+make the loop's wake-ups free:
+
+- The largest built-in CPU stage, fuzzy matching, releases the GIL while it
+  scores (`rapidfuzz.process.cdist`).
+- Offloaded code that holds the GIL (pure-Python loops in your components)
+  delays the loop more with every thread running it.
+  `OffloaderConfig.max_cpu_jobs` bounds that; see
+  [Capping CPU-bound jobs](../guide/concepts/offloading.md#capping-cpu-bound-jobs)
+  for measurements.
+- Full garbage collections run on the loop thread. With 16 concurrent
+  retrievals over 2,000 documents they were the largest stalls measured
+  (60–80 ms each); `gc.freeze()` after start-up removed most of them. See
+  [Keep the event loop responsive](../guide/how-to/event-loop-latency.md).
+
 ## Cancellation
 
 Cancelling a `retrieve`, `ingest` or `delete` is safe:
 
-- Offloader permits are released when the thread finishes, not when the
-  awaiting coroutine is cancelled, so capacity is never over-committed.
+- Offloader permits (tenant, workload-kind and CPU slots, and the resourcera
+  lease) are released when the thread finishes, not when the awaiting
+  coroutine is cancelled, so capacity is never over-committed.
 - Snapshot readers and leases are released in `finally` blocks.
 - An indexing round started by a write is not cancelled when the write stops
   waiting (`index_wait_timeout`); `close()` waits for it.
@@ -53,6 +72,10 @@ SQLite metadata file:
   builds are abandoned.
 - Durable reader leases keep shared generations alive while another engine
   reads them.
+- Embedded backend files have one owner process. A second process's
+  `LadybugGraphStore` on the same file fails at startup with
+  `BackendUnavailableError`; share a graph through one owner process or a
+  `GraphStoreABC` on a server database such as Neo4j.
 
 See [Run several engines on one store](../guide/how-to/multiple-engines.md).
 

@@ -30,6 +30,7 @@ from retrievalloom.domain.retrieval import (
 )
 from retrievalloom.errors import (
     BackendError,
+    BackendUnavailableError,
     ComponentContractError,
     ConfigurationError,
     LifecycleError,
@@ -54,6 +55,8 @@ if TYPE_CHECKING:
 ENTITY_METHOD = MethodRef(channel=Channel.GRAPH, method="graph.entity")
 _SEMANTICS = ScoreSemantics(higher_is_better=True, range=ScoreRange.UNBOUNDED)
 _MAX_DEPTH = 5
+# LadybugDB's message when another process holds the database file's lock.
+_LOCK_FAILURE = "Could not set lock on file"
 _SCHEMA = (
     "CREATE NODE TABLE IF NOT EXISTS RLNode("
     "id STRING, scope_key STRING, generation_id STRING, object_id STRING, kind STRING, "
@@ -121,10 +124,20 @@ class LadybugGraphStore(GraphStoreABC):
         if self._path is not None:
             self._path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            self._database = ladybug.Database(
-                str(self._path) if self._path is not None else None,
-                buffer_pool_size=self._buffer_pool_size,
-            )
+            try:
+                self._database = ladybug.Database(
+                    str(self._path) if self._path is not None else None,
+                    buffer_pool_size=self._buffer_pool_size,
+                )
+            except RuntimeError as exc:
+                if _LOCK_FAILURE not in str(exc):
+                    raise
+                raise BackendUnavailableError(
+                    "the LadybugDB file is locked by another process; one process may own "
+                    "a LadybugDB database at a time (use a single owner process, or a "
+                    "server-backed GraphStoreABC such as one on Neo4j, to share a graph)",
+                    details={"path": str(self._path), "error": str(exc)},
+                ) from exc
             self._connection = ladybug.Connection(self._database)
             for statement in _SCHEMA:
                 self._connection.execute(statement)

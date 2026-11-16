@@ -375,3 +375,81 @@ async def test_event_loop_stays_responsive_during_blocking_job() -> None:
     assert result is None
     assert len(lags) >= 10
     assert max(lags) < 0.15
+
+
+async def test_cpu_and_workload_caps_apply_across_tenants() -> None:
+    gate = threading.Event()
+    running: list[str] = []
+
+    def job(name: str) -> str:
+        running.append(name)
+        gate.wait(5)
+        return name
+
+    offloader = await started(max_cpu_jobs=1, workload_limits={WorkloadKind.EMBEDDING: 1})
+    try:
+        cpu = asyncio.create_task(offloader.run(WorkloadKind.RERANK, job, "rerank", tenant="a"))
+        await eventually(lambda: running == ["rerank"])
+        blocked = [
+            asyncio.create_task(offloader.run(WorkloadKind.NLI, job, "nli", tenant="b")),
+            asyncio.create_task(offloader.run(WorkloadKind.EMBEDDING, job, "embed-1", tenant="c")),
+        ]
+        # I/O-bound kinds are not limited by the CPU cap.
+        io = asyncio.create_task(offloader.run(WorkloadKind.IO_RETRIEVAL, job, "io", tenant="d"))
+        await eventually(lambda: "io" in running)
+        await asyncio.sleep(0.05)
+        assert sorted(running) == ["io", "rerank"]
+        gate.set()
+        assert await asyncio.gather(cpu, io, *blocked) == ["rerank", "io", "nli", "embed-1"]
+    finally:
+        gate.set()
+        await offloader.close()
+
+
+async def test_workload_limit_holds_its_slot_until_the_thread_finishes() -> None:
+    gate = threading.Event()
+    offloader = await started(workload_limits={WorkloadKind.GRAPH_QUERY: 1})
+    try:
+        with pytest.raises(OperationTimeoutError):
+            await offloader.run(WorkloadKind.GRAPH_QUERY, gate.wait, 5, tenant="a", timeout=0.05)
+        follower = asyncio.create_task(offloader.run(WorkloadKind.GRAPH_QUERY, int, tenant="b"))
+        await asyncio.sleep(0.05)
+        assert not follower.done()
+        # Other kinds are not limited.
+        assert await asyncio.wait_for(offloader.run(WorkloadKind.HASHING, int, tenant="b"), 2) == 0
+        gate.set()
+        assert await asyncio.wait_for(follower, 2) == 0
+    finally:
+        gate.set()
+        await offloader.close()
+
+
+async def test_cancel_while_waiting_for_a_cpu_slot_frees_the_tenant_slot() -> None:
+    gate = threading.Event()
+    offloader = await started(max_cpu_jobs=1, max_concurrent_jobs_per_tenant=1)
+    try:
+        holder = asyncio.create_task(offloader.run(WorkloadKind.RERANK, gate.wait, 5, tenant="a"))
+        await eventually(lambda: offloader.outstanding == 1)
+        waiting = asyncio.create_task(offloader.run(WorkloadKind.RERANK, int, tenant="b"))
+        await asyncio.sleep(0.02)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        # Tenant "b" got its only slot back: its I/O job (no CPU slot needed) runs now.
+        assert (
+            await asyncio.wait_for(offloader.run(WorkloadKind.IO_RETRIEVAL, int, tenant="b"), 2)
+            == 0
+        )
+        gate.set()
+        assert await holder is True
+        assert await asyncio.wait_for(offloader.run(WorkloadKind.RERANK, int, tenant="b"), 2) == 0
+    finally:
+        gate.set()
+        await offloader.close()
+
+
+def test_workload_limits_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        OffloaderConfig(workload_limits={WorkloadKind.RERANK: 0})
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        OffloaderConfig.model_validate({"max_cpu_jobs": 0})

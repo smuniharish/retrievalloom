@@ -6,7 +6,7 @@ import asyncio
 import functools
 from concurrent.futures import Executor, ThreadPoolExecutor
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 from pydantic import Field
 from resourcera import (
@@ -64,12 +64,20 @@ class OffloaderConfig(FrozenModel):
         memory_per_job: Memory requirement declared per job.
         cpu_per_job: Optional CPU requirement (needs warm resourcera samples).
         shutdown_timeout: Seconds ``close`` waits for running threads.
+        max_cpu_jobs: Engine-wide cap on CPU-bound jobs running at once, across
+            tenants (``None`` = no cap). CPU-bound Python code holds the GIL, and every
+            extra thread competing for it delays the event loop thread; jobs over the
+            cap wait on the loop without holding an executor thread.
+        workload_limits: Per-kind caps on jobs running at once, across tenants, for
+            example ``{WorkloadKind.EMBEDDING: 1}``.
         resource_config: Settings for the engine-owned resourcera manager. The default
             raises resourcera's monitoring CPU budget to 5% so transient sampling
             spikes on busy hosts do not suspend admission.
     """
 
     max_workers: int = Field(default=8, ge=1, le=512)
+    max_cpu_jobs: int | None = Field(default=None, ge=1)
+    workload_limits: dict[WorkloadKind, Annotated[int, Field(ge=1)]] = Field(default_factory=dict)
     max_concurrent_jobs_per_tenant: int = Field(default=4, ge=1)
     admission_wait_timeout: float = Field(default=5.0, gt=0)
     memory_per_job: str = "16MB"
@@ -80,12 +88,17 @@ class OffloaderConfig(FrozenModel):
     )
 
 
+def _release_slots(slots: list[asyncio.Semaphore]) -> None:
+    for semaphore in reversed(slots):
+        semaphore.release()
+
+
 class Offloader:
     """Executes synchronous callables in an executor without blocking the loop.
 
-    Permits (tenant semaphore and resourcera lease) are released by the executor
-    future's completion, not by the awaiting coroutine, so cancelling or timing out a
-    caller never over-commits capacity while the thread is still running.
+    Permits (tenant, workload and CPU semaphores and the resourcera lease) are released
+    by the executor future's completion, not by the awaiting coroutine, so cancelling or
+    timing out a caller never over-commits capacity while the thread is still running.
 
     Args:
         config: Offloader settings.
@@ -109,6 +122,14 @@ class Offloader:
         self._owns_resources = resource_manager is None
         self._tenant_limit = tenant_limit
         self._semaphores: dict[str, asyncio.Semaphore] = {}
+        self._cpu_semaphore = (
+            asyncio.Semaphore(self._config.max_cpu_jobs)
+            if self._config.max_cpu_jobs is not None
+            else None
+        )
+        self._kind_semaphores = {
+            kind: asyncio.Semaphore(limit) for kind, limit in self._config.workload_limits.items()
+        }
         self._outstanding: set[asyncio.Future[Any]] = set()
         self._releases: set[asyncio.Task[None]] = set()
         self._started = False
@@ -187,8 +208,7 @@ class Offloader:
             raise LifecycleError("offloader is not running")
         manager = self._resources
         assert manager is not None
-        semaphore = self._semaphore(tenant or "")
-        await semaphore.acquire()
+        slots = await self._acquire_slots(kind, tenant or "")
         try:
             lease = await manager.reserve(
                 self._requirements(kind),
@@ -196,22 +216,22 @@ class Offloader:
                 wait_timeout_seconds=self._config.admission_wait_timeout,
             )
         except (AdmissionRejectedError, ResourceError) as exc:
-            semaphore.release()
+            _release_slots(slots)
             raise ResourceAdmissionError(
                 "resource admission rejected the job", details={"workload": kind.value}
             ) from exc
         except BaseException:
-            semaphore.release()
+            _release_slots(slots)
             raise
         loop = asyncio.get_running_loop()
         try:
             future = loop.run_in_executor(executor or self._executor, functools.partial(fn, *args))
         except BaseException:
-            semaphore.release()
+            _release_slots(slots)
             self._release_lease(manager, lease)
             raise
         self._outstanding.add(future)
-        future.add_done_callback(functools.partial(self._finished, semaphore, manager, lease))
+        future.add_done_callback(functools.partial(self._finished, slots, manager, lease))
         try:
             async with asyncio.timeout(timeout):
                 return await asyncio.shield(future)
@@ -220,15 +240,32 @@ class Offloader:
                 "offloaded job exceeded its deadline", details={"workload": kind.value}
             ) from exc
 
+    async def _acquire_slots(self, kind: WorkloadKind, tenant: str) -> list[asyncio.Semaphore]:
+        """Acquire the tenant, workload and CPU slots, always in that order."""
+        wanted = [self._semaphore(tenant)]
+        if kind in self._kind_semaphores:
+            wanted.append(self._kind_semaphores[kind])
+        if self._cpu_semaphore is not None and kind not in _IO_KINDS:
+            wanted.append(self._cpu_semaphore)
+        acquired: list[asyncio.Semaphore] = []
+        try:
+            for semaphore in wanted:
+                await semaphore.acquire()
+                acquired.append(semaphore)
+        except BaseException:
+            _release_slots(acquired)
+            raise
+        return acquired
+
     def _finished(
         self,
-        semaphore: asyncio.Semaphore,
+        slots: list[asyncio.Semaphore],
         manager: ResourceManager,
         lease: ResourceLease,
         future: asyncio.Future[Any],
     ) -> None:
         self._outstanding.discard(future)
-        semaphore.release()
+        _release_slots(slots)
         if not future.cancelled():
             future.exception()  # mark retrieved; the awaiting caller (if any) re-raises it
         self._release_lease(manager, lease)

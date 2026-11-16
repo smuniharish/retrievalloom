@@ -10,28 +10,48 @@ from datetime import UTC, datetime
 from typing import Any
 
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.types import TypeDecorator
 
 
 class UTCDateTime(TypeDecorator[datetime]):
-    """Aware UTC datetime stored as ISO-8601 text (sortable)."""
+    """Aware UTC datetime.
+
+    Stored as sortable ISO-8601 text on SQLite and as native ``timestamptz`` on
+    PostgreSQL; naive datetimes are rejected on every dialect.
+    """
 
     impl = sa.String(32)
     cache_ok = True
 
-    def process_bind_param(self, value: datetime | None, dialect: Any) -> str | None:  # noqa: ARG002 - SQLAlchemy hook signature
-        """Serialise to UTC ISO text."""
+    def load_dialect_impl(self, dialect: Any) -> Any:
+        """Native ``timestamptz`` on PostgreSQL, ISO text elsewhere."""
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(postgresql.TIMESTAMP(timezone=True))
+        return dialect.type_descriptor(self.impl)
+
+    def process_bind_param(self, value: datetime | None, dialect: Any) -> str | datetime | None:
+        """Serialise to UTC (ISO text unless the dialect stores timestamps natively)."""
         if value is None:
             return None
         if value.tzinfo is None:
             raise ValueError("naive datetimes are not accepted")
-        return value.astimezone(UTC).isoformat(timespec="microseconds")
+        value = value.astimezone(UTC)
+        if _native(dialect):
+            return value
+        return value.isoformat(timespec="microseconds")
 
-    def process_result_value(self, value: str | None, dialect: Any) -> datetime | None:  # noqa: ARG002 - SQLAlchemy hook signature
-        """Parse ISO text into an aware datetime."""
+    def process_result_value(self, value: str | datetime | None, dialect: Any) -> datetime | None:  # noqa: ARG002 - SQLAlchemy hook signature
+        """Parse into an aware UTC datetime."""
         if value is None:
             return None
+        if isinstance(value, datetime):
+            return value.astimezone(UTC)
         return datetime.fromisoformat(value)
+
+
+def _native(dialect: Any) -> bool:
+    return dialect is not None and dialect.name == "postgresql"
 
 
 metadata = sa.MetaData()
@@ -87,6 +107,11 @@ document_versions = sa.Table(
     sa.Column("event_id", sa.String(128), nullable=False),
     sa.Column("created_at", UTCDateTime, nullable=False),
 )
+sa.Index(
+    "ix_rl_versions_scope_document",
+    document_versions.c.scope_key,
+    document_versions.c.document_uid,
+)
 
 representations = sa.Table(
     "rl_representations",
@@ -126,6 +151,11 @@ sa.Index(
     ingestion_events.c.appearance_fingerprint,
 )
 sa.Index("ix_rl_events_status", ingestion_events.c.scope_key, ingestion_events.c.status)
+sa.Index(
+    "ix_rl_events_document",
+    ingestion_events.c.scope_key,
+    ingestion_events.c.document_uid,
+)
 
 objects = sa.Table(
     "rl_objects",

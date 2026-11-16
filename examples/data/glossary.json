@@ -1,0 +1,12 @@
+{
+  "*": [
+    {"canonical": "two-factor authentication", "aliases": ["2FA", "MFA", "multi-factor authentication"]},
+    {"canonical": "refund", "aliases": ["chargeback", "money back"]},
+    {"canonical": "proxy", "aliases": ["firewall proxy"]}
+  ],
+  "acme": [
+    {"canonical": "AcmeSync", "aliases": ["acme sync", "sync client"]},
+    {"canonical": "AcmePay", "aliases": ["acme pay"]},
+    {"canonical": "conflicted copy", "aliases": ["Konfliktkopie", "duplicate file"]}
+  ]
+}

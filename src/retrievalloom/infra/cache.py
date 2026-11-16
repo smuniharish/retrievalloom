@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import time
-from collections import OrderedDict
 from typing import TYPE_CHECKING, Any
+
+from cachetools import TTLCache
 
 from retrievalloom.contracts.component import ComponentInfo, make_info
 from retrievalloom.contracts.infra import CacheABC
@@ -40,7 +41,7 @@ class NoCache(CacheABC):
 
 
 class InMemoryLRUCache(CacheABC):
-    """Process-local LRU cache with per-entry TTL.
+    """Process-local LRU cache with per-entry TTL (``cachetools.TTLCache``).
 
     Entries of every namespace share the ``max_entries`` bound. The cache is used from the
     event loop only, so it needs no locking; callers must store immutable values.
@@ -61,9 +62,9 @@ class InMemoryLRUCache(CacheABC):
         if max_entries < 0 or ttl <= 0:
             raise ConfigurationError("max_entries must be >= 0 and ttl > 0")
         self._max_entries = max_entries
-        self._ttl = ttl
-        self._timer = timer
-        self._entries: OrderedDict[tuple[str, str], tuple[float, Any]] = OrderedDict()
+        self._entries: TTLCache[tuple[str, str], Any] = TTLCache(
+            maxsize=max(max_entries, 1), ttl=ttl, timer=timer
+        )
         self._info = make_info(
             component="cache",
             implementation="in_memory_lru",
@@ -77,31 +78,22 @@ class InMemoryLRUCache(CacheABC):
         return self._info
 
     def __len__(self) -> int:
+        self._entries.expire()
         return len(self._entries)
 
     async def get(self, namespace: str, key: str) -> Any | None:
         """Return a live entry and mark it recently used."""
-        entry = self._entries.get((namespace, key))
-        if entry is None:
-            return None
-        expires, value = entry
-        if expires <= self._timer():
-            del self._entries[(namespace, key)]
-            return None
-        self._entries.move_to_end((namespace, key))
-        return value
+        return self._entries.get((namespace, key))
 
     async def set(self, namespace: str, key: str, value: Any) -> None:
         """Store ``value``, evicting the least recently used entries beyond the bound."""
         if self._max_entries == 0:
             return
-        self._entries[(namespace, key)] = (self._timer() + self._ttl, value)
-        self._entries.move_to_end((namespace, key))
-        while len(self._entries) > self._max_entries:
-            self._entries.popitem(last=False)
+        self._entries[(namespace, key)] = value
 
     async def invalidate(self, namespace: str, prefix: str | None = None) -> int:
-        """Remove the entries of ``namespace`` whose key starts with ``prefix``."""
+        """Remove the live entries of ``namespace`` whose key starts with ``prefix``."""
+        self._entries.expire()
         doomed = [
             entry
             for entry in self._entries

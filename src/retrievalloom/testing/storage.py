@@ -12,14 +12,27 @@ from retrievalloom.domain.hashing import random_id, sha256_digest, stable_id
 from retrievalloom.domain.inputs import Scope
 from retrievalloom.domain.records import (
     Channel,
+    CoverageRecord,
+    CoverageState,
+    DerivedObject,
     DocumentRecord,
+    DocumentState,
+    DocumentVersion,
+    EventStatus,
     GenerationState,
     IndexGeneration,
+    IngestionEvent,
     LifecycleTask,
+    LineageEdge,
+    LineageRelation,
+    ObjectContribution,
+    ObjectKind,
+    RepresentationSnapshot,
+    SourceReference,
     TaskKind,
     TaskState,
 )
-from retrievalloom.errors import TenantIsolationError, VersionConflictError
+from retrievalloom.errors import LifecycleError, TenantIsolationError, VersionConflictError
 from retrievalloom.storage.base import StoredRefreshState, UnitKey
 from retrievalloom.testing._base import ComponentContract
 
@@ -58,6 +71,106 @@ def generation(scope: Scope, state: GenerationState = GenerationState.BUILDING) 
         state=state,
         created_at=utc_now(),
     )
+
+
+async def _seed_history(tx: Any, record: DocumentRecord, versions: int) -> list[DerivedObject]:
+    """Write versions, representations, an event, objects, lineage and visibility."""
+    scope_key = record.scope.key
+    uid = record.document_uid
+    unit = UnitKey(scope_key=scope_key, channel="index", method="keyword")
+    source = SourceReference(
+        scope=record.scope,
+        document_id=record.document_id,
+        document_uid=uid,
+        document_version=versions,
+        representation_id="text",
+    )
+    for number in range(1, versions + 1):
+        await tx.put_version(
+            scope_key,
+            DocumentVersion(
+                document_uid=uid,
+                version=number,
+                content_hash=sha256_digest(f"{uid}:{number}"),
+                hash_profile="contract",
+                representation_digests={},
+                metadata={},
+                created_at=utc_now(),
+                event_id=f"evt-{number}",
+            ),
+        )
+        await tx.put_representations(
+            scope_key,
+            [
+                RepresentationSnapshot(
+                    document_uid=uid,
+                    version=number,
+                    representation_id="text",
+                    kind="text",
+                    payload={"text": str(number)},
+                    hash_profile="contract",
+                )
+            ],
+        )
+        await tx.open_visibility(unit, uid, number, number)
+    await tx.put_event(
+        IngestionEvent(
+            event_id=random_id("evt"),
+            scope=record.scope,
+            document_id=record.document_id,
+            document_uid=uid,
+            received_at=utc_now(),
+            status=EventStatus.COMMITTED,
+            content_hash=sha256_digest("c"),
+            appearance_fingerprint=sha256_digest(uid),
+        )
+    )
+    chunk = DerivedObject(
+        object_id=stable_id("obj", uid, "chunk"),
+        scope=record.scope,
+        kind=ObjectKind.CHUNK,
+        document_uid=uid,
+        version=versions,
+        representation_id="text",
+        text="chunk",
+        sources=(source,),
+        content_hash=sha256_digest("chunk"),
+    )
+    entity = DerivedObject(
+        object_id=stable_id("obj", uid, "entity"),
+        scope=record.scope,
+        kind=ObjectKind.GRAPH_ENTITY,
+        text="entity",
+        sources=(source,),
+        content_hash=sha256_digest("entity"),
+    )
+    await tx.put_objects([chunk, entity])
+    await tx.replace_contributions(
+        scope_key,
+        uid,
+        [
+            ObjectContribution(
+                object_id=entity.object_id, document_uid=uid, version=versions, field_path="name"
+            )
+        ],
+    )
+    await tx.put_lineage(
+        [
+            LineageEdge(
+                scope_key=scope_key,
+                from_id=chunk.object_id,
+                to_id=uid,
+                relation=LineageRelation.DERIVED_FROM,
+            ),
+            LineageEdge(
+                scope_key=scope_key,
+                from_id=entity.object_id,
+                to_id=uid,
+                relation=LineageRelation.SUPPORTED_BY,
+            ),
+        ]
+    )
+    return [chunk, entity]
 
 
 class MetadataStoreContract(ComponentContract):
@@ -110,11 +223,16 @@ class MetadataStoreContract(ComponentContract):
             final = await tx.get_document(SCOPE, "doc-1")
             by_uid = await tx.get_documents_by_uid(SCOPE.key, [record.document_uid])
             listed = await tx.list_documents(SCOPE.key)
+            metadata = await tx.list_document_metadata(SCOPE.key, state=DocumentState.ACTIVE)
+            deleted = await tx.list_document_metadata(SCOPE.key, state=DocumentState.DELETED)
+            after = await tx.list_document_metadata(SCOPE.key, after_id="doc-1", limit=1)
         assert final is not None
         assert final.metadata == {"k": "v"}
         assert final.row_revision > stored.row_revision
         assert set(by_uid) == {record.document_uid}
         assert [item.document_id for item in listed] == ["doc-1"]
+        assert [(key, dict(value)) for key, value in metadata] == [("doc-1", {"k": "v"})]
+        assert list(deleted) == list(after) == []
 
     async def test_rollback_on_exception(self, component: Any) -> None:
         """A failing transaction leaves no trace."""
@@ -132,7 +250,9 @@ class MetadataStoreContract(ComponentContract):
         async with component.transaction(write=True) as tx:
             await tx.ensure_scope(SCOPE)
             await tx.ensure_scope(OTHER_SCOPE)
-            await tx.put_document(document(OTHER_SCOPE, "doc-x"), expected_revision=None)
+            foreign = document(OTHER_SCOPE, "doc-x")
+            await tx.put_document(foreign, expected_revision=None)
+            assert await tx.get_documents_by_uid(SCOPE.key, [foreign.document_uid]) == {}
         with pytest.raises(TenantIsolationError):
             async with component.transaction(SCOPE, write=True) as tx:
                 await tx.put_document(document(OTHER_SCOPE, "doc-y"), expected_revision=None)
@@ -154,6 +274,179 @@ class MetadataStoreContract(ComponentContract):
             assert dict(await tx.visible_versions(unit, [uid], 15)) == {uid: frozenset({1})}
             assert dict(await tx.visible_versions(unit, [uid], 25)) == {uid: frozenset({2})}
             assert dict(await tx.visible_versions(unit, [uid], 30)) == {}
+
+    async def test_batched_documents_and_versions(self, component: Any) -> None:
+        """Batched document writes are all-or-nothing and compare-and-set every update."""
+        first, second, third = (document(SCOPE, f"batch-{n}") for n in range(3))
+        async with component.transaction(SCOPE, write=True) as tx:
+            await tx.ensure_scope(SCOPE)
+            await tx.put_documents([(first, None), (second, None)])
+            await tx.put_versions(
+                SCOPE.key,
+                [
+                    DocumentVersion(
+                        document_uid=record.document_uid,
+                        version=1,
+                        content_hash=record.content_hash,
+                        hash_profile="contract",
+                        representation_digests={},
+                        metadata={},
+                        created_at=utc_now(),
+                        event_id=f"evt-{record.document_id}",
+                    )
+                    for record in (first, second)
+                ],
+            )
+        with pytest.raises(VersionConflictError):
+            async with component.transaction(SCOPE, write=True) as tx:
+                await tx.put_documents([(third, None), (first, None)])
+        async with component.transaction(SCOPE, write=False) as tx:
+            stored = await tx.get_documents(SCOPE, ["batch-0", "batch-1", "batch-2", "batch-0"])
+            versions = await tx.get_versions(second.document_uid)
+        assert sorted(stored) == ["batch-0", "batch-1"]
+        assert [version.version for version in versions] == [1]
+        one, two = stored["batch-0"], stored["batch-1"]
+        updates = [
+            (one.model_copy(update={"metadata": {"n": 1}}), one.row_revision),
+            (two.model_copy(update={"metadata": {"n": 2}}), two.row_revision),
+        ]
+        with pytest.raises(VersionConflictError):
+            async with component.transaction(SCOPE, write=True) as tx:
+                await tx.put_documents([updates[0], (updates[1][0], two.row_revision + 7)])
+        async with component.transaction(SCOPE, write=True) as tx:
+            await tx.put_documents([*updates, (third, None)])
+        async with component.transaction(SCOPE, write=False) as tx:
+            final = await tx.get_documents(SCOPE, ["batch-0", "batch-1", "batch-2"])
+        assert {key: record.metadata for key, record in final.items()} == {
+            "batch-0": {"n": 1},
+            "batch-1": {"n": 2},
+            "batch-2": {},
+        }
+        assert final["batch-0"].row_revision == one.row_revision + 1
+
+    async def test_batched_events(self, component: Any) -> None:
+        """Events upsert in batches and fingerprint probes find the latest other event."""
+        now = utc_now()
+
+        def event(event_id: str, fingerprint: str, age: int, **values: Any) -> IngestionEvent:
+            return IngestionEvent(
+                event_id=event_id,
+                scope=SCOPE,
+                document_id="doc",
+                document_uid=stable_id("doc", "events"),
+                received_at=now - timedelta(seconds=age),
+                status=values.pop("status", EventStatus.COMMITTED),
+                content_hash=sha256_digest("c"),
+                appearance_fingerprint=sha256_digest(fingerprint),
+                **values,
+            )
+
+        async with component.transaction(SCOPE, write=True) as tx:
+            await tx.ensure_scope(SCOPE)
+            await tx.put_events(
+                [
+                    event("e-old", "a", 300),
+                    event("e-new", "a", 10),
+                    event("e-pending", "a", 1, status=EventStatus.PENDING),
+                    event("e-b", "b", 10),
+                    event("e-b", "b", 5, counter_after=2),
+                ]
+            )
+            await tx.put_events([])
+        async with component.transaction(SCOPE, write=True) as tx:
+            await tx.put_events([event("e-old", "a", 300, counter_after=9)])
+        async with component.transaction(SCOPE, write=False) as tx:
+            loaded = await tx.get_events(SCOPE.key, ["e-old", "e-b", "e-missing"])
+            found = await tx.find_events_by_fingerprints(
+                SCOPE.key,
+                {
+                    sha256_digest("a"): "e-x",
+                    sha256_digest("b"): "e-b",
+                    sha256_digest("c"): "e-y",
+                },
+                since=now - timedelta(seconds=60),
+            )
+            excluded = await tx.find_events_by_fingerprints(
+                SCOPE.key, {sha256_digest("a"): "e-new"}, since=now - timedelta(seconds=600)
+            )
+        assert sorted(loaded) == ["e-b", "e-old"]
+        assert loaded["e-old"].counter_after == 9
+        assert loaded["e-b"].counter_after == 2
+        assert {key: item.event_id for key, item in found.items()} == {sha256_digest("a"): "e-new"}
+        assert {key: item.event_id for key, item in excluded.items()} == {
+            sha256_digest("a"): "e-old"
+        }
+
+    async def test_batched_objects_and_visibility(self, component: Any) -> None:
+        """Objects list per document in batches; visibility opens in batches like one by one."""
+        unit = UnitKey(scope_key=SCOPE.key, channel="index", method="keyword")
+        records = [document(SCOPE, f"objs-{n}") for n in range(3)]
+        uids = [record.document_uid for record in records]
+        async with component.transaction(SCOPE, write=True) as tx:
+            await tx.ensure_scope(SCOPE)
+            for record in records[:2]:
+                await tx.put_document(record, expected_revision=None)
+                await _seed_history(tx, record, 2)
+            await tx.open_visibility_many(unit, [], 3)
+            # Version 2 of uids[0] is already open; uids[1] goes back to 1; uids[2] is new.
+            await tx.open_visibility_many(unit, [(uids[0], 2), (uids[1], 1), (uids[2], 1)], 3)
+            await tx.close_visibility(SCOPE.key, uids[2], 3)
+            await tx.open_visibility_many(unit, [(uids[2], 5), (uids[2], 1)], 3)
+        async with component.transaction(SCOPE, write=False) as tx:
+            visible = await tx.visible_versions(unit, uids, 3)
+            listed = await tx.list_objects_for_documents(
+                SCOPE.key, [(uids[0], 2), (uids[1], 1), (uids[2], None), (uids[0], None)]
+            )
+            pinned = await tx.list_objects_for_documents(
+                SCOPE.key, [(uids[0], 2), (uids[1], 2), (uids[1], 1)], [ObjectKind.CHUNK]
+            )
+            empty = await tx.list_objects_for_documents(SCOPE.key, [])
+        assert dict(visible) == {
+            uids[0]: frozenset({2}),
+            uids[1]: frozenset({1}),
+            uids[2]: frozenset({1}),
+        }
+        assert [obj.kind for obj in listed[uids[0]]] == [ObjectKind.CHUNK]
+        assert listed[uids[1]] == []
+        assert listed[uids[2]] == []
+        assert {uid: [obj.version for obj in objs] for uid, objs in pinned.items()} == {
+            uids[0]: [2],
+            uids[1]: [2],
+        }
+        assert dict(empty) == {}
+
+    async def test_batched_coverage_state(self, component: Any) -> None:
+        """Coverage state changes for many documents at once."""
+        unit = UnitKey(scope_key=SCOPE.key, channel="index", method="keyword")
+        uids = [stable_id("doc", "coverage", str(n)) for n in range(3)]
+        async with component.transaction(SCOPE, write=True) as tx:
+            await tx.ensure_scope(SCOPE)
+            await tx.upsert_coverage(
+                [
+                    CoverageRecord(
+                        scope_key=SCOPE.key,
+                        document_uid=uid,
+                        channel=Channel.INDEX,
+                        method="keyword",
+                        target_version=1,
+                        state=CoverageState.READY,
+                        updated_at=utc_now(),
+                    )
+                    for uid in uids
+                ]
+            )
+            await tx.set_documents_coverage_state(
+                SCOPE.key, {uids[0]: 4, uids[1]: 5}, CoverageState.PENDING
+            )
+            await tx.set_documents_coverage_state(SCOPE.key, {}, CoverageState.PENDING)
+        async with component.transaction(SCOPE, write=False) as tx:
+            rows = await tx.get_coverage(unit, uids)
+        assert {uid: (row.state, row.target_version) for uid, row in rows.items()} == {
+            uids[0]: (CoverageState.PENDING, 4),
+            uids[1]: (CoverageState.PENDING, 5),
+            uids[2]: (CoverageState.READY, 1),
+        }
+        assert rows[uids[0]].row_revision == rows[uids[2]].row_revision + 1
 
     async def test_generations_and_pointer_cas(self, component: Any) -> None:
         """Generations CAS by revision; pointers publish with compare-and-set."""
@@ -244,3 +537,82 @@ class MetadataStoreContract(ComponentContract):
             states = await tx.load_refresh_states("ns")
             assert list(await tx.load_refresh_states("other")) == []
         assert [(item.resource_id, item.state) for item in states] == [("a", {"n": 3})]
+
+    async def test_purge_document_erases_every_row(self, component: Any) -> None:
+        """Only tombstones with fully deleted coverage are purgeable; purge is idempotent."""
+        record = document(SCOPE, "doc-purge", 2)
+        other = document(OTHER_SCOPE, "doc-purge", 2)
+        unit = UnitKey(scope_key=SCOPE.key, channel="index", method="keyword")
+        async with component.transaction(write=True) as tx:
+            await tx.ensure_scope(SCOPE)
+            await tx.ensure_scope(OTHER_SCOPE)
+            await tx.put_document(other, expected_revision=None)
+            await _seed_history(tx, other, 2)
+        async with component.transaction(SCOPE, write=True) as tx:
+            await tx.put_document(record, expected_revision=None)
+            objects = await _seed_history(tx, record, 2)
+            await tx.upsert_coverage(
+                [
+                    CoverageRecord(
+                        scope_key=SCOPE.key,
+                        document_uid=record.document_uid,
+                        channel=Channel.INDEX,
+                        method="keyword",
+                        state=CoverageState.READY,
+                        updated_at=utc_now(),
+                    )
+                ]
+            )
+        with pytest.raises(LifecycleError):
+            async with component.transaction(SCOPE, write=True) as tx:
+                await tx.purge_document(SCOPE.key, record.document_uid)
+        deleted_at = utc_now()
+        later = deleted_at + timedelta(seconds=1)
+        async with component.transaction(SCOPE, write=True) as tx:
+            stored = await tx.get_document(SCOPE, "doc-purge")
+            tombstone = stored.model_copy(
+                update={"state": DocumentState.DELETED, "deleted_at": deleted_at}
+            )
+            await tx.put_document(tombstone, expected_revision=stored.row_revision)
+            await tx.set_document_coverage_state(
+                SCOPE.key, record.document_uid, CoverageState.PENDING, target_version=2
+            )
+            assert list(await tx.list_purgeable_documents(SCOPE.key, deleted_before=later)) == []
+            await tx.set_document_coverage_state(
+                SCOPE.key, record.document_uid, CoverageState.DELETED, target_version=2
+            )
+            assert await tx.list_purgeable_documents(SCOPE.key, deleted_before=deleted_at) == []
+            listed = await tx.list_purgeable_documents(SCOPE.key, deleted_before=later)
+            assert [item.document_uid for item in listed] == [record.document_uid]
+            assert await tx.purge_document(
+                SCOPE.key, record.document_uid, object_ids=[objects[1].object_id]
+            )
+            assert await tx.purge_document(SCOPE.key, record.document_uid) == 0
+        async with component.transaction(SCOPE, write=False) as tx:
+            assert await tx.get_document(SCOPE, "doc-purge") is None
+            assert list(await tx.get_versions(record.document_uid)) == []
+            assert list(await tx.get_representations(record.document_uid, 1)) == []
+            assert dict(await tx.get_objects(SCOPE.key, [o.object_id for o in objects])) == {}
+            assert list(await tx.list_document_contributions(SCOPE.key, record.document_uid)) == []
+            assert list(await tx.get_lineage(SCOPE.key, objects[0].object_id)) == []
+            assert dict(await tx.get_coverage(unit, [record.document_uid])) == {}
+            assert dict(await tx.visible_versions(unit, [record.document_uid], 10**6)) == {}
+        async with component.transaction(OTHER_SCOPE, write=False) as tx:
+            assert await tx.get_document(OTHER_SCOPE, "doc-purge") is not None
+            assert len(await tx.get_versions(other.document_uid)) == 2
+
+    async def test_retention_prunes_versions_and_events(self, component: Any) -> None:
+        """Old unprotected versions and old terminal events are pruned; the rest stay."""
+        record = document(SCOPE, "doc-retained", 4)
+        async with component.transaction(SCOPE, write=True) as tx:
+            await tx.ensure_scope(SCOPE)
+            await tx.put_document(record, expected_revision=None)
+            await _seed_history(tx, record, 4)
+            assert await tx.prune_versions(SCOPE.key, keep=1) == 3
+            assert await tx.prune_versions(SCOPE.key, keep=1) == 0
+            assert [item.version for item in await tx.get_versions(record.document_uid)] == [4]
+            assert list(await tx.get_representations(record.document_uid, 1)) == []
+            future = utc_now() + timedelta(days=1)
+            assert await tx.prune_events(SCOPE.key, before=utc_now() - timedelta(days=1)) == 0
+            assert await tx.prune_events(SCOPE.key, before=future) == 1
+            assert await tx.prune_events(SCOPE.key, before=future) == 0

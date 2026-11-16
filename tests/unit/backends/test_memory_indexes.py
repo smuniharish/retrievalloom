@@ -1,4 +1,4 @@
-"""In-memory generational indexes: generation states, tombstones, fuzzy and BM25 edges."""
+"""In-memory generational indexes: generation states, removal, fuzzy and BM25 edges."""
 
 from __future__ import annotations
 
@@ -106,8 +106,12 @@ async def test_generation_lifecycle_errors(context: ComponentContext) -> None:
     with pytest.raises(GenerationError, match="not found"):
         await index.write(OTHER, "gen", [])
     await index.seal(SCOPE, "gen")
-    with pytest.raises(GenerationError, match="sealed"):
-        await index.write(SCOPE, "gen", [item("a", "python")])
+    # Sealed generations stay writable: objects are inserted or replaced in place.
+    await index.write(SCOPE, "gen", [item("a", "rust"), item("b", "python")])
+    await index.write(SCOPE, "gen", [item("a", "python python")])
+    hits = await index.search(SCOPE, "gen", KeywordQuery(text="python"), 10, None)
+    assert sorted(names(hits)) == ["a", "b"]
+    assert (await index.seal(SCOPE, "gen")).object_count == 2
 
 
 async def test_staged_remove_and_rewrite_before_seal(context: ComponentContext) -> None:
@@ -123,14 +127,14 @@ async def test_staged_remove_and_rewrite_before_seal(context: ComponentContext) 
     assert names(hits) == ["b"]
 
 
-async def test_tombstones_mask_sealed_objects(context: ComponentContext) -> None:
+async def test_remove_deletes_sealed_objects(context: ComponentContext) -> None:
     index = await ready(AhoCorasickKeywordIndex(), context)
     await index.create_generation(SCOPE, spec("gen", KeywordEntry(canonical="python")))
     await index.write(SCOPE, "gen", [item("a", "python", {"v": 1}), item("b", "python")])
     await index.seal(SCOPE, "gen")
     assert await index.remove(SCOPE, "gen", [oid("a"), oid("a"), oid("zzz")]) == 1
     assert (await index.seal(SCOPE, "gen")).object_count == 1
-    # Tombstoned objects can no longer have their metadata updated.
+    # Removed objects can no longer have their metadata updated.
     assert await index.update_metadata(SCOPE, "gen", {oid("a"): {"v": 2}, oid("b"): {"v": 2}}) == 1
     hits = await index.search(SCOPE, "gen", KeywordQuery(text="python"), 10, Eq(field="v", value=2))
     assert names(hits) == ["b"]
@@ -245,7 +249,7 @@ async def test_fuzzy_keeps_five_best_terms_per_gram(context: ComponentContext) -
 
 
 # sparse ------------------------------------------------------------------------------------
-@pytest.mark.parametrize("kwargs", [{"k1": 0.0}, {"b": -0.1}, {"b": 1.5}])
+@pytest.mark.parametrize("kwargs", [{"k1": 0.0}, {"b": -0.1}, {"b": 1.5}, {"method": "bm99"}])
 def test_sparse_rejects_invalid_parameters(kwargs: dict[str, Any]) -> None:
     with pytest.raises(ConfigurationError):
         BM25sIndex(**kwargs)

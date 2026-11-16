@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from retrievalloom.config import IngestionConfig, LifecycleConfig
+from retrievalloom.contracts.models import KeywordEntry
 from retrievalloom.domain.hashing import random_id
 from retrievalloom.domain.inputs import (
     DocumentInput,
@@ -27,10 +28,12 @@ from retrievalloom.domain.records import (
 )
 from retrievalloom.errors import BackendUnavailableError, VersionConflictError
 from retrievalloom.graph.normalizer import IdentityGraphNormalizer
+from retrievalloom.index.text import StaticKeywordDictionary
 from retrievalloom.lifecycle.canonical import document_uid
 from retrievalloom.lifecycle.derivation import derive_chunks
 from retrievalloom.lifecycle.indexer import ReaderTracker, _supporting_versions, task_units
 from retrievalloom.lifecycle.ingestion import GraphDerivation
+from retrievalloom.lifecycle.units import DICTIONARY_DIGEST, ItemPreparer
 from retrievalloom.storage.sqlite import SQLiteTransaction
 from tests.fakes import CapitalizedExtractor
 from tests.unit.lifecycle.helpers import (
@@ -225,6 +228,44 @@ async def test_incremental_update_replaces_the_previous_version(
     assert await visible(h, "d1") == {2}
 
 
+class MutableDictionary(StaticKeywordDictionary):
+    """Keyword dictionary whose entries the test changes between runs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.current: tuple[KeywordEntry, ...] = ()
+
+    async def entries(self, scope: Any) -> tuple[KeywordEntry, ...]:
+        del scope
+        return self.current
+
+
+async def test_keyword_dictionary_change_forces_a_full_build(store: SQLiteMetadataStore) -> None:
+    dictionary = MutableDictionary()
+    preparer = ItemPreparer(tokenizer=None, embedder=None, dictionary=dictionary)
+    h = build(store, [index_unit(DictIndex(), method="keyword")], preparer=preparer)
+
+    async def run(document_id: str) -> IndexGeneration:
+        await h.ingestion.ingest([text_doc(document_id, document_id)], SCOPE)
+        await h.indexer.run(SCOPE, h.unit)
+        ref = await pointer(h)
+        assert ref is not None
+        return await generation(h, ref.generation_id)
+
+    first = await run("d1")
+    assert DICTIONARY_DIGEST not in first.stats  # no dictionary entries
+    assert (await run("d2")).generation_id == first.generation_id  # updated in place
+    dictionary.current = (KeywordEntry(canonical="d1"),)
+    second = await run("d3")
+    # Keyword postings of unchanged objects depend on the dictionary: rebuilt.
+    assert second.generation_id != first.generation_id
+    assert isinstance(second.stats[DICTIONARY_DIGEST], str)
+    assert (await run("d4")).generation_id == second.generation_id
+    dictionary.current = (KeywordEntry(canonical="d1", aliases=("first",)),)
+    assert (await run("d5")).generation_id != second.generation_id
+    assert set((await active_items(h)).values()) == {"d1", "d2", "d3", "d4", "d5"}
+
+
 async def test_document_changed_while_writing_is_written_again(
     store: SQLiteMetadataStore,
 ) -> None:
@@ -348,6 +389,24 @@ async def test_document_revived_during_removal_stays_pending(
     row = await coverage(h, "d1")
     assert row.state == CoverageState.READY
     assert await visible(h, "d1") == {1}
+
+
+async def test_document_purged_during_removal_stays_purged(store: SQLiteMetadataStore) -> None:
+    backend = DictIndex()
+    h = harness(store, backend)
+    await h.ingestion.ingest([text_doc("d1", "a")], SCOPE)
+    await h.indexer.run(SCOPE, h.unit)
+    await h.ingestion.delete(["d1"], SCOPE)
+
+    async def purge() -> None:
+        async with store.transaction(SCOPE, write=True) as transaction:
+            await transaction.purge_document(SCOPE.key, uid("d1"))
+
+    backend.hooks["remove"] = purge
+    await h.indexer.run(SCOPE, h.unit)
+    async with store.transaction(SCOPE, write=False) as transaction:
+        assert await transaction.get_coverage(h.unit.key(SCOPE), [uid("d1")]) == {}
+    assert await active_items(h) == {}
 
 
 # full rebuilds and publication ----------------------------------------------------------
@@ -738,6 +797,51 @@ async def test_reconcile_drops_orphans_and_retires(store: SQLiteMetadataStore) -
     async with store.transaction(SCOPE, write=False) as transaction:
         untouched = await transaction.get_generation(other_id)
     assert untouched is not None  # another unit's generation is not ours to reconcile
+
+
+async def test_reconcile_waits_for_the_unit_lock(store: SQLiteMetadataStore) -> None:
+    h = harness(store)
+    async with h.indexer.lock(SCOPE, h.unit):
+        task = asyncio.create_task(h.indexer.reconcile(SCOPE, h.unit))
+        await asyncio.sleep(0.01)
+        assert not task.done()
+    await task
+
+
+async def test_reconcile_keeps_a_generation_registered_meanwhile(
+    store: SQLiteMetadataStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = DictIndex(mutable=False)
+    h = harness(store, backend)
+    await h.ingestion.ingest([text_doc("d1", "a")], SCOPE)
+    await h.indexer.run(SCOPE, h.unit)
+    current = await pointer(h)
+    assert current is not None
+    active = await generation(h, current.generation_id)
+    late_id = random_id("gen")
+    listed = backend.list_generations
+
+    async def register_then_list(scope: Any) -> Any:
+        # Another engine starts a build after reconcile read the metadata.
+        async with store.transaction(SCOPE, write=True) as transaction:
+            await transaction.put_generation(
+                active.model_copy(
+                    update={
+                        "generation_id": late_id,
+                        "state": GenerationState.BUILDING,
+                        "row_revision": 0,
+                    }
+                ),
+                expected_revision=None,
+            )
+        backend.generations[(SCOPE.key, late_id)] = backend.generations[
+            (SCOPE.key, current.generation_id)
+        ]
+        return await listed(scope)
+
+    monkeypatch.setattr(backend, "list_generations", register_then_list)
+    await h.indexer.reconcile(SCOPE, h.unit)
+    assert (SCOPE.key, late_id) in backend.generations
 
 
 # helpers --------------------------------------------------------------------------------

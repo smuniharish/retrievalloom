@@ -25,6 +25,9 @@ if TYPE_CHECKING:
     from retrievalloom import Components, RetrievalEngine
 
 LIVE_DIR = Path(__file__).parent
+# Live tests load models only from RL_TEST_MODELS_DIR; never let a library download one.
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
 QDRANT_URL = os.environ.get("RL_TEST_QDRANT_URL")
 QDRANT_GRPC_PORT = int(os.environ.get("RL_TEST_QDRANT_GRPC_PORT", "6334"))
 MODELS_DIR = os.environ.get("RL_TEST_MODELS_DIR")

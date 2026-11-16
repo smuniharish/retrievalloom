@@ -84,24 +84,19 @@ uv run python scripts/copy_models.py --source "/path/to/HF_MODELS"
 It copies `bge-m3`, `bge-reranker-v2-m3` and `UltraBERT-150M-nli`. The live
 examples also need the `examples` dependency group (`torch`, `transformers`).
 
-FlashRank is not copied, and the tests never download it. Provision it by hand
-(see [Provision the model files](../guide/how-to/rerank-and-nli.md#provision-the-model-files)):
+The live suites never download a model: `tests/live/conftest.py` sets
+`HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`, and every model loads from
+its folder under `models/`:
 
 ```text
 models/
   bge-m3/
   bge-reranker-v2-m3/
   UltraBERT-150M-nli/
-  flashrank/
-    ms-marco-TinyBERT-L-2-v2/
-      flashrank-TinyBERT-L-2-v2.onnx
-      config.json
-      tokenizer.json
-      tokenizer_config.json
-      special_tokens_map.json
 ```
 
-If the FlashRank files are missing, its contract test is skipped.
+The default FlashRank reranker has no live test because its model is not in
+`models/`; the unit tests cover it with a fake ranker.
 
 ### Event-loop lag and garbage collection
 

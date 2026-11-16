@@ -20,6 +20,7 @@ RetrievalLoom needs Python 3.12 or later. It is tested on 3.12, 3.13 and 3.14.
 | --- | --- | --- |
 | `graph` | The graph channel, stored in [LadybugDB](https://pypi.org/project/ladybug/) | `pip install "retrievalloom[graph]"` |
 | `structure` | The structure channel, searched with [TreeSearch](https://pypi.org/project/pytreesearch/) | `pip install "retrievalloom[structure]"` |
+| `postgres` | The [PostgreSQL metadata store](../guide/how-to/durable-storage.md#a-shared-postgresql-store), on [asyncpg](https://pypi.org/project/asyncpg/), shared by engines on several hosts | `pip install "retrievalloom[postgres]"` |
 | `testing` | The pytest [contract kits](../api/testing.md) for your own components | `pip install "retrievalloom[testing]"` |
 | `all` | `graph` and `structure` | `pip install "retrievalloom[all]"` |
 
@@ -35,7 +36,7 @@ The base package installs everything the default engine uses:
 | `bm25s` | The sparse (BM25) method |
 | `qdrant-client` | The dense method's vector store (in memory, on disk, server or cloud) |
 | `ranknexus` | Rank fusion |
-| `flashrank` | The optional FlashRank reranker |
+| `flashrank` | The default reranker (models are never downloaded implicitly; without one, results keep the RRF-fused order) |
 | `refresh-engine` | Scheduling of background index work |
 | `resourcera` | Admission control for offloaded work |
 | `agxai` | The optional agxai provenance recorder |

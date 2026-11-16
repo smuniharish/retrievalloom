@@ -70,4 +70,4 @@ podman run -d --name rl-qdrant -p 6333:6333 -p 6334:6334 qdrant/qdrant
 
 See also: [Keep data on disk](../guide/how-to/durable-storage.md),
 [Use your own embedding model](../guide/how-to/embedding-model.md), and the
-[own embeddings on Qdrant example](../examples/byo-embeddings-qdrant.md).
+[customer support](../examples/customer-support.md) and [durable restart](../examples/durable-restart.md) examples.

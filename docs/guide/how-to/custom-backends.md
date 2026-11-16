@@ -75,7 +75,9 @@ of another scope.
 
 - `mutable_in_place=True` lets the lifecycle write into the active generation
   (incremental updates). With `False`, every change builds a new generation,
-  and `write` is accepted only before `seal`.
+  and `write` is accepted only before `seal`. Keyword and fuzzy units still
+  get a new generation when the keyword dictionary changes, because
+  `GenerationSpec.keyword_entries` is fixed per generation.
 - `durable=True` declares that data outlives the process and may be shared
   between engines. The engine then protects generations with durable reader
   leases (see [Run several engines on one store](multiple-engines.md)).

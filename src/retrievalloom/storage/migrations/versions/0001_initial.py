@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 revision = "0001_initial"
 down_revision = None
 branch_labels = None
 depends_on = None
+
+# ISO-8601 text on SQLite, native ``timestamptz`` on PostgreSQL (see ``schema.UTCDateTime``).
+_TIMESTAMP = sa.String(length=32).with_variant(postgresql.TIMESTAMP(timezone=True), "postgresql")
 
 
 def upgrade() -> None:
@@ -40,8 +44,8 @@ def upgrade() -> None:
         sa.Column("last_error", sa.JSON(), nullable=True),
         sa.Column("lease_owner", sa.String(length=64), nullable=True),
         sa.Column("lease_epoch", sa.Integer(), nullable=False),
-        sa.Column("lease_expires_at", sa.String(length=32), nullable=True),
-        sa.Column("updated_at", sa.String(length=32), nullable=False),
+        sa.Column("lease_expires_at", _TIMESTAMP, nullable=True),
+        sa.Column("updated_at", _TIMESTAMP, nullable=False),
         sa.Column("row_revision", sa.Integer(), nullable=False),
         sa.PrimaryKeyConstraint("scope_key", "document_uid", "channel", "method", "instance"),
     )
@@ -63,7 +67,7 @@ def upgrade() -> None:
         sa.Column("source", sa.JSON(), nullable=True),
         sa.Column("representation_digests", sa.JSON(), nullable=False),
         sa.Column("event_id", sa.String(length=128), nullable=False),
-        sa.Column("created_at", sa.String(length=32), nullable=False),
+        sa.Column("created_at", _TIMESTAMP, nullable=False),
         sa.PrimaryKeyConstraint("document_uid", "version"),
     )
     op.create_table(
@@ -78,9 +82,9 @@ def upgrade() -> None:
         sa.Column("content_hash", sa.String(length=80), nullable=False),
         sa.Column("hash_profile", sa.String(length=32), nullable=False),
         sa.Column("state", sa.String(length=16), nullable=False),
-        sa.Column("created_at", sa.String(length=32), nullable=False),
-        sa.Column("updated_at", sa.String(length=32), nullable=False),
-        sa.Column("deleted_at", sa.String(length=32), nullable=True),
+        sa.Column("created_at", _TIMESTAMP, nullable=False),
+        sa.Column("updated_at", _TIMESTAMP, nullable=False),
+        sa.Column("deleted_at", _TIMESTAMP, nullable=True),
         sa.Column("change_seq", sa.Integer(), nullable=False),
         sa.Column("metadata", sa.JSON(), nullable=False),
         sa.Column("dataset", sa.String(length=256), nullable=True),
@@ -101,8 +105,8 @@ def upgrade() -> None:
         "rl_engine_instances",
         sa.Column("instance_id", sa.String(length=64), nullable=False),
         sa.Column("engine_id", sa.String(length=64), nullable=False),
-        sa.Column("started_at", sa.String(length=32), nullable=False),
-        sa.Column("expires_at", sa.String(length=32), nullable=False),
+        sa.Column("started_at", _TIMESTAMP, nullable=False),
+        sa.Column("expires_at", _TIMESTAMP, nullable=False),
         sa.PrimaryKeyConstraint("instance_id"),
     )
     op.create_table(
@@ -128,10 +132,10 @@ def upgrade() -> None:
         sa.Column("state", sa.String(length=16), nullable=False),
         sa.Column("owner_id", sa.String(length=64), nullable=True),
         sa.Column("lease_epoch", sa.Integer(), nullable=False),
-        sa.Column("heartbeat_at", sa.String(length=32), nullable=True),
-        sa.Column("created_at", sa.String(length=32), nullable=False),
-        sa.Column("published_at", sa.String(length=32), nullable=True),
-        sa.Column("retired_at", sa.String(length=32), nullable=True),
+        sa.Column("heartbeat_at", _TIMESTAMP, nullable=True),
+        sa.Column("created_at", _TIMESTAMP, nullable=False),
+        sa.Column("published_at", _TIMESTAMP, nullable=True),
+        sa.Column("retired_at", _TIMESTAMP, nullable=True),
         sa.Column("predecessor_id", sa.String(length=64), nullable=True),
         sa.Column("stats", sa.JSON(), nullable=False),
         sa.Column("row_revision", sa.Integer(), nullable=False),
@@ -159,7 +163,7 @@ def upgrade() -> None:
         sa.Column("delivery", sa.JSON(), nullable=True),
         sa.Column("staged_payload", sa.JSON(), nullable=True),
         sa.Column("error", sa.JSON(), nullable=True),
-        sa.Column("received_at", sa.String(length=32), nullable=False),
+        sa.Column("received_at", _TIMESTAMP, nullable=False),
         sa.PrimaryKeyConstraint("scope_key", "event_id"),
     )
     op.create_index(
@@ -227,8 +231,8 @@ def upgrade() -> None:
         "rl_reader_leases",
         sa.Column("generation_id", sa.String(length=64), nullable=False),
         sa.Column("engine_id", sa.String(length=64), nullable=False),
-        sa.Column("expires_at", sa.String(length=32), nullable=False),
-        sa.Column("heartbeat_at", sa.String(length=32), nullable=False),
+        sa.Column("expires_at", _TIMESTAMP, nullable=False),
+        sa.Column("heartbeat_at", _TIMESTAMP, nullable=False),
         sa.PrimaryKeyConstraint("generation_id", "engine_id"),
     )
     op.create_table(
@@ -269,10 +273,10 @@ def upgrade() -> None:
         sa.Column("attempts", sa.Integer(), nullable=False),
         sa.Column("owner_id", sa.String(length=64), nullable=True),
         sa.Column("lease_epoch", sa.Integer(), nullable=False),
-        sa.Column("heartbeat_at", sa.String(length=32), nullable=True),
+        sa.Column("heartbeat_at", _TIMESTAMP, nullable=True),
         sa.Column("refresh_correlation_id", sa.String(length=128), nullable=True),
-        sa.Column("created_at", sa.String(length=32), nullable=False),
-        sa.Column("updated_at", sa.String(length=32), nullable=False),
+        sa.Column("created_at", _TIMESTAMP, nullable=False),
+        sa.Column("updated_at", _TIMESTAMP, nullable=False),
         sa.Column("error", sa.JSON(), nullable=True),
         sa.Column("row_revision", sa.Integer(), nullable=False),
         sa.PrimaryKeyConstraint("task_id"),

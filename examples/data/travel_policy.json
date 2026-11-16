@@ -1,0 +1,33 @@
+{
+  "id": "travel-policy",
+  "title": "Travel and Expense Policy",
+  "text": "This policy applies to every employee and contractor who travels on company business.",
+  "children": [
+    {
+      "title": "Booking travel",
+      "text": "Book flights, trains and hotels through the travel portal so that duty-of-care alerts reach you.",
+      "children": [
+        {"title": "Flights", "text": "Economy class is standard. Business class is allowed for flights longer than six hours with approval from your director."},
+        {"title": "Trains", "text": "First-class rail tickets are allowed when the journey is longer than two hours and the fare difference is below 30 percent."},
+        {"title": "Hotels", "text": "Hotel rates are capped at 180 euros per night in Europe and 250 dollars per night in North America, breakfast included."}
+      ]
+    },
+    {
+      "title": "Expenses",
+      "text": "Expenses must be necessary, reasonable and supported by itemised receipts.",
+      "children": [
+        {"title": "Meals", "text": "The daily meal allowance is 60 euros. Alcohol is not reimbursed unless a client is present."},
+        {"title": "Submitting receipts", "text": "Upload receipts to the expense tool within 14 days of returning. Claims submitted later than 60 days are rejected."},
+        {"title": "Lost receipts", "text": "A lost receipt can be replaced by a signed missing-receipt declaration for amounts up to 50 euros."}
+      ]
+    },
+    {
+      "title": "Safety",
+      "text": "Register every trip in the travel portal before departure.",
+      "children": [
+        {"title": "High-risk destinations", "text": "Travel to high-risk destinations requires a security briefing and approval from the chief security officer."},
+        {"title": "Emergencies", "text": "In an emergency call the 24-hour assistance line printed on your travel card; costs are covered by the company."}
+      ]
+    }
+  ]
+}
