@@ -1,0 +1,188 @@
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14"]
+build-backend = "uv_build"
+
+[project]
+name = "retrievalloom"
+version = "0.1.0"
+description = "An async-first, provider-agnostic, multi-channel retrieval and evidence orchestration engine for Python applications."
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+  { name = "S MUNI HARISH", email = "samamuniharish@gmail.com" },
+]
+keywords = [
+  "retrieval",
+  "rag",
+  "search",
+  "hybrid-search",
+  "bm25",
+  "vector-search",
+  "knowledge-graph",
+  "evidence",
+  "provenance",
+  "asyncio",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Framework :: AsyncIO",
+  "Framework :: Pydantic :: 2",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
+]
+dependencies = [
+  "agxai>=1.0.2,<2",
+  "ahocorasick-rs>=1.0.3,<2",
+  "aiosqlite>=0.22.1,<1",
+  "alembic>=1.20.1,<2",
+  "bm25s>=0.3.16,<0.4",
+  "flashrank>=0.2.10,<0.3",
+  "numpy>=2.2",
+  "pydantic>=2.14.3,<3",
+  "qdrant-client>=1.20.0,<2",
+  "ranknexus>=0.1.0,<0.2",
+  "rapidfuzz>=3.14.6,<4",
+  "refresh-engine>=1.0.0,<2",
+  "resourcera>=0.2.0,<0.3",
+  "sqlalchemy[asyncio]>=2.1.8,<2.2",
+  "structlog>=25.5.0",
+]
+
+[project.optional-dependencies]
+graph = ["ladybug>=0.22.3,<0.23"]
+structure = ["pytreesearch>=1.1.1,<2"]
+testing = ["pytest>=9.2.0", "pytest-asyncio>=1.4.1.post1"]
+all = ["retrievalloom[graph,structure]"]
+
+[project.urls]
+Homepage = "https://github.com/smuniharish/retrievalloom"
+Documentation = "https://retrievalloom.readthedocs.io/"
+Changelog = "https://github.com/smuniharish/retrievalloom/blob/master/CHANGELOG.md"
+Issues = "https://github.com/smuniharish/retrievalloom/issues"
+Repository = "https://github.com/smuniharish/retrievalloom"
+
+[dependency-groups]
+test = [
+  "hypothesis>=6.170.14",
+  "pytest>=9.2.0",
+  "pytest-asyncio>=1.4.1.post1",
+  "pytest-cov>=7.1.0",
+]
+lint = ["ruff>=0.17.3"]
+types = ["pyrefly>=1.4.1"]
+docs = [
+  "griffe-pydantic>=1.3.2,<2",
+  "mkdocstrings-python>=2.0.10,<3",
+  "zensical>=0.1.0,<0.2",
+]
+dev = [
+  { include-group = "test" },
+  { include-group = "lint" },
+  { include-group = "types" },
+]
+examples = [
+    "torch>=2.9",
+    "transformers>=4.57",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
+filterwarnings = ["error"]
+markers = [
+  "live: tests requiring explicitly configured external services (Podman containers)",
+  "qdrant: tests requiring RL_TEST_QDRANT_URL",
+  "models: tests requiring local model weights under RL_TEST_MODELS_DIR",
+  "graph: tests requiring the graph extra",
+  "structure: tests requiring the structure extra",
+  "benchmark: performance regression tests",
+  "examples: tests that execute the scripts under examples/",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+  "A",
+  "ARG",
+  "ASYNC",
+  "B",
+  "C4",
+  "D",
+  "DTZ",
+  "E",
+  "ERA",
+  "F",
+  "I",
+  "N",
+  "PERF",
+  "PIE",
+  "PT",
+  "PTH",
+  "RUF",
+  "S",
+  "SIM",
+  "T20",
+  "TC",
+  "UP",
+  "W",
+]
+# Google style documents constructor arguments on the class, not on __init__.
+ignore = ["D105", "D107", "S101"]
+
+[tool.ruff.lint.flake8-type-checking]
+# Pydantic resolves field annotations at runtime, so their imports must stay real.
+runtime-evaluated-base-classes = [
+  "pydantic.BaseModel",
+  "retrievalloom.domain.base.FrozenModel",
+  "retrievalloom.domain.base.VersionedModel",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"examples/**/*.py" = ["ARG", "D", "T201"]
+"scripts/**/*.py" = ["ARG", "D", "T201"]
+"tests/**/*.py" = ["A002", "ARG", "D", "S101", "S105", "S106", "S108", "S311"]
+"src/retrievalloom/storage/migrations/**/*.py" = ["D", "ERA", "E501"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.pyrefly]
+project-includes = ["src", "tests", "examples", "scripts"]
+search-path = ["src", "."]
+
+[tool.coverage.run]
+branch = true
+source = ["retrievalloom"]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+skip_covered = true
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "^\\s*\\.\\.\\.$",
+  "@abstractmethod",
+]

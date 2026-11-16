@@ -218,3 +218,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# RetrievalLoom: local model weights, reports and runtime data never enter git
+models/
+reports/
+.retrievalloom/
+.playwright-mcp/
+.pytest-tmp*/
+.cov-*
+.covdata-*/
