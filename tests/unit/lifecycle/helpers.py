@@ -253,7 +253,7 @@ def build(
     logger = RecordingLogger()
     lifecycle = lifecycle or LifecycleConfig(background=False)
     instance = instance_id or random_id("inst")
-    readers = ReaderTracker(lease_ttl=lifecycle.instance_ttl, clock=clock)
+    readers = ReaderTracker(lease_ttl=lifecycle.lease_ttl, clock=clock)
     indexer = UnitIndexer(
         store,
         preparer or ItemPreparer(tokenizer=None, embedder=None, dictionary=None),

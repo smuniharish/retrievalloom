@@ -17,7 +17,13 @@ from retrievalloom import (
     Scope,
     TextRepresentation,
 )
-from retrievalloom.config import ChannelsConfig, FuzzyConfig, IndexChannelConfig, MethodConfig
+from retrievalloom.config import (
+    ChannelsConfig,
+    FuzzyConfig,
+    IndexChannelConfig,
+    LifecycleConfig,
+    MethodConfig,
+)
 from retrievalloom.domain.records import GenerationState, TaskState
 from retrievalloom.domain.retrieval import ResultStatus
 from retrievalloom.index.vector import QdrantVectorStore
@@ -109,7 +115,7 @@ async def server(qdrant_url: str, prefix: str) -> AsyncIterator[dict[str, Any]]:
 
 
 def dense_engine(
-    db: Path, server: dict[str, Any], embedding: HashEmbedding | None = None
+    db: Path, server: dict[str, Any], embedding: HashEmbedding | None = None, **layers: Any
 ) -> AbstractAsyncContextManager[RetrievalEngine]:
     """Dense-only engine on a shared metadata file and a shared Qdrant server prefix."""
     return running_engine(
@@ -119,6 +125,7 @@ def dense_engine(
             vector_store=QdrantVectorStore(**server),
         ),
         retrieval=DENSE_ONLY,
+        **layers,
     )
 
 
@@ -145,6 +152,39 @@ async def test_engines_share_pointers_and_generations(
         )
         result = await writer.retrieve("tenant isolation scope", scope=scope, config=DENSE)
         assert document_ids(result)[0] == "tenancy"
+
+
+async def test_reader_lease_of_another_engine_holds_back_retirement(
+    tmp_path: Path, server: dict[str, Any]
+) -> None:
+    """A generation another engine has read is only dropped once that engine lets go."""
+    scope = Scope(tenant_id="acme")
+    db = tmp_path / "meta.db"
+    fast = LifecycleConfig(poll_interval=0.2)
+    async with dense_engine(db, server, lifecycle=fast) as owner:
+        await owner.ingest(documents(CORPUS), scope=scope)
+        (old,) = await active_generations(owner, scope)
+        async with dense_engine(
+            db, server, lifecycle=LifecycleConfig(background=False)
+        ) as other:  # never retires anything itself
+            result = await other.retrieve("dense vectors", scope=scope, config=DENSE)
+            assert document_ids(result)[0] == "vectors"  # holds a lease on `old`
+            ref = await owner.rebuild(scope=scope, channel="index", method="dense")
+            assert (await owner.wait_for(ref, timeout=60)).state is TaskState.SUCCEEDED
+            await asyncio.sleep(1)  # several maintenance rounds
+            states = {
+                g.generation_id: g.state for g in (await owner.status(scope=scope)).generations
+            }
+            assert states[old] is GenerationState.RETIRING
+        async with asyncio.timeout(30):  # `other` closed and released its lease
+            while True:
+                status = await owner.status(scope=scope)
+                states = {g.generation_id: g.state for g in status.generations}
+                if states.get(old, GenerationState.RETIRED) is GenerationState.RETIRED:
+                    break
+                await asyncio.sleep(0.2)
+        result = await owner.retrieve("dense vectors", scope=scope, config=DENSE)
+        assert document_ids(result)[0] == "vectors"
 
 
 async def test_rebuild_switches_generation_under_concurrent_retrieval(

@@ -465,7 +465,7 @@ async def test_retiring_an_active_generation_keeps_it_readable(
 
 async def test_durable_reader_leases_hold_back_retirement(store: SQLiteMetadataStore) -> None:
     clock = FakeClock()
-    ttl = LifecycleConfig().instance_ttl
+    ttl = LifecycleConfig().lease_ttl
     backend = DictIndex(mutable=False, durable=True)
     h = harness(store, backend, clock=clock, instance_id="inst_a")
     other = harness(store, backend, clock=clock, instance_id="inst_b")

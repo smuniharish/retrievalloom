@@ -638,7 +638,7 @@ class RetrievalEngine:
             graph=(graph_store, []),
             structure=(structure_engine, []),
         )
-        readers = ReaderTracker(lease_ttl=config.lifecycle.instance_ttl)
+        readers = ReaderTracker(lease_ttl=config.lifecycle.lease_ttl)
         lifecycle = config.lifecycle
         indexer = UnitIndexer(
             store,
