@@ -184,6 +184,23 @@ docstring-code-format = true
 [tool.pyrefly]
 project-includes = ["src", "tests", "examples", "scripts"]
 search-path = ["src", ".", "examples"]
+# Installed only by the `examples` dependency group; CI type-checks without it.
+ignore-missing-imports = [
+  "FlagEmbedding",
+  "FlagEmbedding.*",
+  "fastapi",
+  "fastapi.*",
+  "neo4j",
+  "neo4j.*",
+  "opentelemetry",
+  "opentelemetry.*",
+  "torch",
+  "torch.*",
+  "transformers",
+  "transformers.*",
+  "uvicorn",
+  "uvicorn.*",
+]
 
 [tool.coverage.run]
 branch = true

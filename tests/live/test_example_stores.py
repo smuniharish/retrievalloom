@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+pytest.importorskip("neo4j", reason="install the `examples` dependency group")
+
 from examples.adapters import Neo4jGraphStore, PgVectorStore
 from retrievalloom.domain.filters import And, Eq, In, Not
 from retrievalloom.domain.hashing import random_id

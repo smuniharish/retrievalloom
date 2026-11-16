@@ -51,6 +51,14 @@ requires_service = pytest.mark.skipif(
     importlib.util.find_spec("fastapi") is None or importlib.util.find_spec("uvicorn") is None,
     reason="requires the examples dependency group (fastapi, uvicorn)",
 )
+requires_neo4j_driver = pytest.mark.skipif(
+    importlib.util.find_spec("neo4j") is None,
+    reason="requires the examples dependency group (neo4j)",
+)
+requires_opentelemetry = pytest.mark.skipif(
+    importlib.util.find_spec("opentelemetry") is None,
+    reason="requires the examples dependency group (opentelemetry-sdk)",
+)
 
 
 def needs(*names: str) -> pytest.MarkDecorator:
@@ -173,6 +181,7 @@ def check_knowledge_graph(lines: list[str], store: str) -> None:
 
 @pytest.mark.graph
 @requires_graph
+@requires_neo4j_driver
 def test_knowledge_graph_ladybug() -> None:
     check_knowledge_graph(run_example("knowledge_graph"), "ladybug (embedded)")
 
@@ -202,6 +211,7 @@ def test_agxai_provenance() -> None:
     assert lines.count("    linked to source uid: True") == 2
 
 
+@requires_opentelemetry
 def test_observability_in_memory() -> None:
     lines = run_example("observability_jaeger")
     marker = next(i for i, line in enumerate(lines) if line.startswith("trace_id="))
