@@ -1,8 +1,10 @@
 # Offloading and admission
 
-The public API is async-only. Blocking work never runs on the event loop: it
-runs in a thread executor through the engine's **offloader**, under admission
-control from [resourcera](../../integrations/resourcera.md).
+Keep your service responsive while models run and indexes build. Every engine
+method is async, and blocking work never runs on your event loop. It runs in
+worker threads through the engine's **offloader**, which also limits how much
+work runs at once so the process does not run out of memory. Admission control
+comes from [resourcera](../../integrations/resourcera.md).
 
 ## What the offloader does
 
@@ -56,7 +58,8 @@ arguments.
 
 ## Offloading in your own components
 
-Your component receives the offloader in `initialize(context)` as
+If you write your own model or store adapter, route its blocking calls through
+the same offloader so they share these limits. Your component receives the offloader in `initialize(context)` as
 `context.offloader`. Keep it and route every blocking call through it:
 
 ```python
@@ -116,7 +119,9 @@ cannot start before its deadline raises `OperationTimeoutError`.
 
 ## Capping CPU-bound jobs
 
-A worker thread running pure-Python code holds the GIL. The event loop thread
+Limit CPU-heavy jobs when your own components run pure-Python code. A worker
+thread running pure-Python code holds the GIL (the interpreter lock that lets
+only one thread run Python code at a time). The event loop thread
 then waits for the GIL each time it wakes up, and the more such threads run at
 once, the longer it waits. Two `OffloaderConfig` settings bound how many jobs
 run at once, across all tenants:
@@ -149,7 +154,7 @@ jobs of about 40 ms of pure-Python arithmetic each, 3 runs per setting:
 | `2` | 37–62 ms | 574–630 ms |
 | `1` | 24–30 ms | 607–682 ms |
 
-Total time does not suffer, because the GIL serialises such jobs anyway.
+Total time does not suffer, because the GIL serializes such jobs anyway.
 
 Leave the cap off for work that releases the GIL. The built-in fuzzy index
 scores with `rapidfuzz.process.cdist`, which releases the GIL while it runs
@@ -170,3 +175,8 @@ the heap holds about 224,000 tracked objects and every full collection paused
 the loop for 60–80 ms; these pauses were the largest stalls measured. Calling
 `gc.collect()` and `gc.freeze()` once the engine has loaded its indexes cut the
 max loop lag from 122–153 ms to 21–29 ms over three runs.
+
+## Next steps
+
+- Apply these measurements in [Keep the event loop responsive](../how-to/event-loop-latency.md).
+- Share one resource budget across libraries with [resourcera](../../integrations/resourcera.md).

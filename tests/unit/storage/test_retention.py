@@ -35,6 +35,7 @@ from tests.unit.storage.factories import (
 )
 
 if TYPE_CHECKING:
+    from retrievalloom.domain.inputs import Scope
     from retrievalloom.storage.sqlite import SQLiteMetadataStore
 
 UNIT = UnitKey(scope_key=SCOPE.key, channel="index", method="keyword")
@@ -184,3 +185,92 @@ async def test_purge_document_rules(store: SQLiteMetadataStore) -> None:
     with pytest.raises(TenantIsolationError):
         async with store.transaction(SCOPE, write=True) as tx:
             await tx.purge_document(OTHER.key, doc)
+
+
+async def _tombstone(store: SQLiteMetadataStore, document_id: str, scope: Scope = SCOPE) -> str:
+    async with store.transaction(scope, write=True) as tx:
+        stored = document(scope, document_id, 1, state=DocumentState.DELETED, deleted_at=utc_now())
+        await tx.put_document(stored, expected_revision=None)
+        await tx.put_version(scope.key, version(scope, document_id, 1))
+        await tx.put_objects([obj(scope, f"{document_id}-chunk", document_id=document_id)])
+    return uid(scope, document_id)
+
+
+async def test_purge_documents_erases_a_batch_and_logs_it(store: SQLiteMetadataStore) -> None:
+    first = await _tombstone(store, "a")
+    second = await _tombstone(store, "b")
+    foreign = await _tombstone(store, "x", OTHER)
+    aggregate = obj(SCOPE, "agg", document_id=None, number=None, kind=ObjectKind.GRAPH_ENTITY)
+    async with store.transaction(SCOPE, write=True) as tx:
+        await tx.put_objects([aggregate])
+        assert await tx.purge_documents(SCOPE.key, {}, purged_at=utc_now()) == 0
+        purged_at = utc_now()
+        # 2 documents + 2 versions + 2 chunks + the aggregate; a foreign uid is ignored.
+        deleted = await tx.purge_documents(
+            SCOPE.key,
+            {first: [aggregate.object_id], second: [], foreign: []},
+            purged_at=purged_at,
+        )
+        assert deleted == 7
+        log = await tx.list_purge_log(SCOPE.key, after_seq=0)
+        assert await tx.purge_log_heads() == {SCOPE.key: 2}
+    assert [(entry.seq, entry.document_uid) for entry in log] == list(
+        enumerate(sorted([first, second]), 1)
+    )
+    assert next(entry for entry in log if entry.document_uid == first).object_ids == tuple(
+        sorted([aggregate.object_id, obj(SCOPE, "a-chunk").object_id])
+    )
+    assert {entry.purged_at for entry in log} == {purged_at}
+    third = await _tombstone(store, "c")
+    async with store.transaction(SCOPE, write=True) as tx:
+        await tx.purge_document(SCOPE.key, third)
+        await tx.purge_document(SCOPE.key, third)  # gone: nothing is logged
+        assert [entry.seq for entry in await tx.list_purge_log(SCOPE.key, after_seq=1)] == [2, 3]
+        assert len(await tx.list_purge_log(SCOPE.key, after_seq=0, limit=1)) == 1
+    async with store.transaction(OTHER, write=False) as tx:
+        assert await tx.get_document(OTHER, "x") is not None
+        assert await tx.purge_log_heads() == {}
+    async with store.transaction(write=False) as tx:
+        assert await tx.purge_log_heads() == {SCOPE.key: 3}
+
+
+async def test_prune_purge_log_keeps_the_newest_entry(store: SQLiteMetadataStore) -> None:
+    for name in ("a", "b", "c", "d"):
+        doc = await _tombstone(store, name)
+        async with store.transaction(SCOPE, write=True) as tx:
+            await tx.purge_document(SCOPE.key, doc)
+    later = utc_now() + timedelta(seconds=1)
+    async with store.transaction(SCOPE, write=True) as tx:
+        assert await tx.prune_purge_log(SCOPE.key, before=utc_now() - timedelta(days=1)) == 0
+        assert await tx.prune_purge_log(SCOPE.key, before=later, limit=2) == 2
+        assert await tx.prune_purge_log(SCOPE.key, before=later) == 1
+        assert await tx.prune_purge_log(SCOPE.key, before=later) == 0
+        assert [entry.seq for entry in await tx.list_purge_log(SCOPE.key, after_seq=0)] == [4]
+    doc = await _tombstone(store, "e")
+    async with store.transaction(SCOPE, write=True) as tx:
+        await tx.purge_document(SCOPE.key, doc)
+        assert await tx.purge_log_heads() == {SCOPE.key: 5}  # sequences never restart
+
+
+async def test_prune_versions_keeps_versions_referenced_by_events(
+    store: SQLiteMetadataStore,
+) -> None:
+    await _history(store, "doc-1", 4)
+    async with store.transaction(SCOPE, write=True) as tx:
+        referencing = event(
+            SCOPE,
+            "e2",
+            status=EventStatus.COMMITTED,
+            version_after=2,
+        )
+        foreign = event(OTHER, "e1", status=EventStatus.COMMITTED, version_after=1)
+        await tx.put_event(referencing)
+    async with store.transaction(OTHER, write=True) as tx:
+        await tx.put_event(foreign)
+    async with store.transaction(SCOPE, write=True) as tx:
+        assert await tx.prune_versions(SCOPE.key, keep=1) == 2
+    assert await _versions(store, "doc-1") == [2, 4]
+    async with store.transaction(SCOPE, write=True) as tx:
+        assert await tx.prune_events(SCOPE.key, before=utc_now() + timedelta(seconds=1)) == 1
+        assert await tx.prune_versions(SCOPE.key, keep=1) == 1
+    assert await _versions(store, "doc-1") == [4]

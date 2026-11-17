@@ -1,9 +1,9 @@
 # Examples
 
-Runnable scripts live in the `examples/` directory of the repository. Each one models a
-real deployment: a support help center, a multi-tenant SaaS, an HTTP service, a
-fact-checker, and so on. Each is a self-contained `async def main()` program that prints
-what it retrieves and why.
+Start from a working program that matches your use case. Each script in the
+repository's `examples/` directory models a real deployment, such as a support help
+center, a multi-tenant SaaS, an HTTP service or a fact-checker. Each is a
+self-contained `async def main()` program that prints what it finds and why.
 
 Run them from the repository root:
 
@@ -13,33 +13,36 @@ python examples/quickstart.py
 
 ## Scenarios
 
+Pick the scenario closest to your application:
+
 | Example | Use case | What it shows | Needs |
 | --- | --- | --- | --- |
-| [Quickstart](quickstart.md) | First contact | In-memory engine; ingest, retrieve, sources, provenance, a metadata filter | base install |
-| [Customer support](customer-support.md) | Help-center search | Keyword + fuzzy (typos) + BM25 + bge-m3 dense on Qdrant, RRF, cross-encoder rerank, filters, per-request config, cache | models, Qdrant |
-| [Multi-tenant SaaS](multi-tenant-saas.md) | One engine, many customers | Tenants and collections, a role/tenant `AccessPolicyABC` that denies, quotas, JSONL audit log | base install |
-| [Document lifecycle](document-lifecycle.md) | Operating a corpus | Updates, deletes, `purge`, adding a dense method later, `backfill`, `rebuild` after a model change, status, health | models, pgvector |
-| [Knowledge graph](knowledge-graph.md) | Platform/ops Q&A | Entity extraction and alias normalisation, graph channel on Neo4j (or LadybugDB), graph + index fusion | `graph` extra; Neo4j optional |
+| [Quickstart](quickstart.md) | First search | In-memory engine; ingest, retrieve, sources, provenance, a metadata filter | base install |
+| [Customer support](customer-support.md) | Help-center search | Keyword, typo-tolerant, BM25 and bge-m3 semantic search on Qdrant, merged with RRF and reranked; filters, per-request settings, cache | models, Qdrant |
+| [Multi-tenant SaaS](multi-tenant-saas.md) | One engine, many customers | Tenants and collections, a role-based access policy that denies cross-tenant access, quotas, a JSONL audit log | base install |
+| [Document lifecycle](document-lifecycle.md) | Operating a corpus | Updates, deletes, `purge`, adding semantic search later with `backfill`, `rebuild` after a model change, status, health | models, pgvector |
+| [Knowledge graph](knowledge-graph.md) | Platform/ops Q&A | Entity extraction and alias normalization, graph channel on Neo4j (or LadybugDB), graph + index fusion | `graph` extra; Neo4j optional |
 | [Policy manual](policy-manual.md) | Long structured documents | Structure channel over a sectioned policy, custom deduplicator and consolidator | `structure` extra |
 | [Fact checking](fact-checking.md) | Claim verification | `retrieve(..., claims=[...])`, cross-encoder relevance, NLI verdicts, contradictions | models |
 | [HTTP service](http-service.md) | Retrieval as a service | FastAPI app with engine lifespan, `/ingest`, `/retrieve`, `/status`, `/health`, error mapping, Postman collection | `examples` group |
 | [Observability with Jaeger](observability-jaeger.md) | Tracing in production | agxai `OpenTelemetryObservability`, OTLP export to Jaeger, trace ids in structlog | Jaeger optional |
 | [Durable restart](durable-restart.md) | Restarts and deploys | `data_dir` SQLite metadata + Qdrant vectors and learned-sparse index reused across processes | models, Qdrant |
-| [Pre-chunked and multi-representation](prechunked-and-multi-representation.md) | Bring your own chunks | Application chunks with spans and pages; a second (structure) representation | `structure` extra |
-| [agxai provenance](agxai-provenance.md) | Explainability records | Ingestion, deletion and retrieval recorded on an agxai run with provenance links | base install |
+| [Pre-chunked and multi-representation](prechunked-and-multi-representation.md) | Bring your own chunks | Your own chunks with spans and pages, plus a section tree for the structure channel | `structure` extra |
+| [Channel combinations](channel-combinations.md) | Choosing search methods | The same queries run with different combinations of methods and channels, and how each combination changes the results | varies by combination |
+| [agxai provenance](agxai-provenance.md) | Audit trail | Ingestion, deletion and retrieval recorded on an agxai run with provenance links | base install |
 
 ## Custom components
 
-The scenarios use the custom components in `examples/adapters/`. Each one implements a
-library ABC. Together they cover almost every extension point: embeddings, a
+The scenarios use the custom components in `examples/adapters/`: production-style
+adapters you can copy into your own code. Each one implements a library contract. Together they cover almost every extension point: embeddings, a
 learned-sparse index, reranking, NLI, graph and vector stores, tokenizer, keyword
-dictionary, cache, access policy, provenance, fusion, score normalisation, deduplication,
-consolidation, and graph extraction and normalisation. Each one passes its contract kit
+dictionary, cache, access policy, provenance, fusion, score normalization, deduplication,
+consolidation, and graph extraction and normalization. Each one passes its contract kit
 from `retrievalloom.testing`. See [Custom components](adapters.md).
 
 ## Services and settings
 
-The live examples read `RL_EXAMPLES_<NAME>`, falling back to the test suite's
+Some examples use real models and services. The live examples read `RL_EXAMPLES_<NAME>`, falling back to the test suite's
 `RL_TEST_<NAME>`. When a setting is missing, the example prints what to set and exits
 with status 0.
 
@@ -70,6 +73,7 @@ podman compose -f examples/compose.yaml up -d   # or: docker compose -f ... up -
 
 ## Tests
 
+Every example is tested, so the code on these pages runs as shown.
 `tests/examples/test_examples.py` runs every script as a subprocess and asserts on what it
 prints, such as rankings, denials, verdicts and span trees, not just the exit code. It
 also drives the FastAPI app in-process through `httpx.ASGITransport`.

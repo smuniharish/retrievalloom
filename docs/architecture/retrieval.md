@@ -1,18 +1,19 @@
 # Retrieval execution
 
-This page maps the [retrieval pipeline](../guide/concepts/retrieval.md) onto
-modules.
+Find the module behind each stage of a search, so you can read its code, replace
+it or debug it. This page maps the
+[retrieval pipeline](../guide/concepts/retrieval.md) onto modules.
 
 ## Modules
 
 | Module | Role |
 | --- | --- |
-| `engine` | Authorisation, the per-tenant request slot, the access policy's row filter. |
+| `engine` | Authorization, the per-tenant request slot, the access policy's row filter. |
 | `retrieval.planning` | Validates the request against limits and the tenant policy; decides which methods, reranking and NLI run; builds fusion. |
 | `retrieval.snapshot` | Picks the published generation per method, checks fingerprint and coverage, registers readers and leases. |
 | `retrieval.pipeline` | `RetrievalPipeline`: runs methods, fusion, candidates, rerank, NLI, consolidation, cache and recording under one deadline. |
 | `retrieval.candidates` | Resolves hits to objects and versions; drops deleted, invisible and superseded versions and filtered objects. |
-| `evidence.fusion`, `evidence.normalizers` | Fusion strategies on ranknexus and score normalisers. |
+| `evidence.fusion`, `evidence.normalizers` | Fusion strategies on ranknexus and score normalizers. |
 | `evidence.dedup` | `IdentityAndHashDeduplicator`. |
 | `evidence.rerank` | Rerank stage and `FlashRankReranker`. |
 | `evidence.consolidation` | `HierarchicalConsolidator` and NLI summaries. |

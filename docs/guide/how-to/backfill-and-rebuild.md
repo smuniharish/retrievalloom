@@ -1,10 +1,16 @@
 # Backfill and rebuild
 
-Both operations queue a durable lifecycle task in the metadata store and
-return a `LifecycleTaskRef` at once. The lifecycle runs the task; wait for it
+Add semantic search to documents you already indexed, retry documents that
+failed, or rebuild an index after a model change, all while searches keep
+working. Indexes normally stay current on their own: background indexing
+handles every ingested document and rebuilds an index when its configuration
+changes. Backfill and rebuild let you start that work yourself.
+
+Both operations queue a durable task in the metadata store and return a
+`LifecycleTaskRef` at once. Background indexing runs the task; wait for it
 with `wait_for`.
 
-## Backfill
+## Fill gaps with a backfill
 
 A backfill indexes every document that the selected units do not cover yet.
 Use it after a unit failed for some documents, or after enabling a method on
@@ -19,7 +25,10 @@ print(result.state.value, result.attempts, result.error)
 ```
 
 - Queuing a backfill resets the units' `failed` coverage to `pending`, with
-  the attempt counter at zero.
+  the attempt counter at zero. Failures with a retryable error, such as a
+  backend outage, are retried automatically
+  ([Recover from failures](../concepts/lifecycle.md#recover-from-failures)), so
+  you need a backfill only after a non-retryable failure or to retry at once.
 - The task succeeds once no selected unit has pending work left.
 
 Retrieval can queue backfills itself: with
@@ -28,10 +37,10 @@ finds a method without an index queues a backfill and returns a
 `backfill_scheduled` info warning. Coverage in the `failed` state also
 queues one.
 
-## Rebuild
+## Rebuild an index
 
-A rebuild builds a complete new generation of one unit and switches to it
-atomically. Requests keep reading the old generation until the switch, and
+A rebuild builds a complete new copy (generation) of one index and switches
+to it in one step. Requests keep reading the old generation until the switch, and
 requests that started before the switch finish on the old one.
 
 ```python
@@ -43,11 +52,11 @@ result = await engine.wait_for(ref, timeout=600)
 method (`keyword`, `fuzzy`, `sparse`, `dense`); omit it to rebuild every method
 of the channel.
 
-You rarely need to rebuild by hand. The lifecycle starts a full build on its
-own when a unit has no generation yet or when its fingerprint changes, for
-example after switching the embedding model.
+You rarely need to rebuild by hand. Background indexing starts a full build on
+its own when an index does not exist yet or when its configuration changes, for
+example after you switch the embedding model.
 
-## Waiting
+## Wait for a task
 
 `wait_for(ref, timeout=None)` returns a `LifecycleTaskResult` when the task is
 terminal: `succeeded`, `failed` or `cancelled`. A failed task is returned, not
@@ -64,13 +73,13 @@ retries a failing unit up to `LifecycleConfig.max_attempts` times. A task
 whose units fail in `max_attempts` rounds ends `failed`, with
 `error.message` "units did not reach coverage".
 
-## Selecting units
+## Select indexes
 
 `channels`, `channel` and `methods` must match configured units. A selection
 that matches none raises `ConfigurationError`, for example `method="dense"`
 without an embedding model.
 
-## Watching progress
+## Watch progress
 
 `engine.status(scope=scope)` returns a `ScopeStatus`:
 
@@ -81,6 +90,9 @@ print(status.generations)  # method, generation id, state, backend id
 print(status.tasks)  # {"succeeded": 2, "queued": 1}
 ```
 
-See [Index lifecycle](../concepts/lifecycle.md) for generations and coverage
-states, and the
-[document lifecycle example](../../examples/document-lifecycle.md).
+## Next steps
+
+- [Generations and coverage](../concepts/lifecycle.md) explains generations,
+  coverage states and how changes reach the indexes.
+- The [document lifecycle example](../../examples/document-lifecycle.md)
+  backfills a new dense method and rebuilds after a model change.

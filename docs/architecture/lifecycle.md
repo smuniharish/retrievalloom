@@ -8,7 +8,7 @@ store. For the concepts (generations, coverage, tasks, leases), read
 
 | Module | Role |
 | --- | --- |
-| `lifecycle.canonical` | Canonicalises a `DocumentInput`: content hash, event id and idempotency tier. |
+| `lifecycle.canonical` | Canonicalizes a `DocumentInput`: content hash, event id and idempotency tier. |
 | `lifecycle.ingestion` | `IngestionService`: writes documents, versions, representations, events and visibility in one transaction per document. |
 | `lifecycle.derivation` | Derives objects (chunks, structure nodes, graph aggregates) from representations. |
 | `lifecycle.units` | `IndexUnit` (a method bound to its backend and fingerprint) and `ItemPreparer` (turns objects into index items, embedding them when needed). |
@@ -17,7 +17,17 @@ store. For the concepts (generations, coverage, tasks, leases), read
 
 ## A round
 
-`LifecycleCoordinator.run_once(scope=None)` runs one refresh-engine refresh:
+`LifecycleCoordinator.run_once(scope=None)` first evicts purged objects:
+`DocumentEraser.evict_purged` reads the purge-log entries (`rl_purge_log`)
+appended since this engine's watermark and removes their objects from the
+live generations of this engine's engine-local (in-memory) units, under the
+unit lock so a concurrent build cannot re-add them. Engines start following the
+log at its end when the coordinator starts, because their in-memory units are
+built from the store afterwards. If entries the engine never applied were
+pruned (`purge_log_retention`), it rebuilds its engine-local units of that
+scope instead. A failed eviction is logged (`purge_eviction_failed`) and
+retried next round; indexing continues. Then it runs one refresh-engine
+refresh:
 
 1. **Discovery.** For every scope and unit, `UnitIndexer.needs_work` checks
    whether there is no pointer, the active generation has another fingerprint,
@@ -25,15 +35,17 @@ store. For the concepts (generations, coverage, tasks, leases), read
    open. Each lagging pair becomes a refresh-engine resource.
 2. **Processing.** `UnitIndexer.run(scope, unit)` runs for each resource, at
    most `max_concurrency` at a time, each bounded by `unit_timeout` and retried
-   up to `max_attempts` times. One lock per (scope, unit, instance) serialises
+   up to `max_attempts` times. One lock per (scope, unit, instance) serializes
    work on a unit within an engine.
-   - Missing coverage rows are created.
+   - Missing coverage rows are created for documents changed after the unit's
+     coverage watermark (the highest `change_seq` already covered); a unit
+     without a watermark reads the scope once.
    - For per-document units, deleted documents are removed from the active
      generation.
    - A **full build** runs when there is a rebuild task, no pointer, a
      fingerprint change, a keyword dictionary change (the
-     `keyword_entries_digest` stat of the active generation differs from the
-     digest of the current `GenerationSpec.keyword_entries`), or pending work
+     `keyword_dictionary_revision` stat of the active generation differs from
+     `KeywordDictionaryABC.revision`), or pending work
      on a unit that cannot update in place. Otherwise pending documents are
      applied **incrementally**.
 3. **Settling tasks.** Tasks whose units are covered succeed. A task whose
@@ -64,11 +76,11 @@ RapidFuzz or bm25s has an incremental API, so the libraries are used for
 matching and scoring only, and each index keeps its own postings:
 
 - Before `seal`, writes are staged and built in one offloaded pass.
-- After `seal`, a write is analysed in the offloader (automaton scan,
+- After `seal`, a write is analyzed in the offloader (automaton scan,
   term counts) and then applied on the event loop without awaiting: the
   objects it replaces are deleted, the new ones inserted. `remove` deletes
   objects the same way. Both cost time proportional to the changed objects.
-  A per-generation lock serialises changes; searches never see a
+  A per-generation lock serializes changes; searches never see a
   half-applied change.
 - After any change the structure equals a fresh build over the live objects,
   so search results do not depend on the update history:
@@ -85,9 +97,13 @@ matching and scoring only, and each index keeps its own postings:
 
 The generation is fixed to the keyword dictionary it was built with
 (`GenerationSpec.keyword_entries`). A full build stores the dictionary's
-digest in the generation's `keyword_entries_digest` stat; when the current
-dictionary has another digest, the indexer builds a new generation instead of
-updating in place.
+revision in the generation's `keyword_dictionary_revision` stat (and the
+digest of its entries in `keyword_entries_digest`); when the dictionary's
+revision differs, the indexer builds a new generation instead of updating in
+place. `MetadataKeywordDictionary` keeps its terms with document counts in
+the metadata store, adjusted by ingest and delete in their own transactions,
+so its revision is one row and changes only when a term appears or
+disappears.
 
 ## Maintenance
 
@@ -103,6 +119,10 @@ updating in place.
    - drop backend generations unknown to the store or no longer live
      (orphans).
 4. Purge the metadata rows of expired engine instances.
+5. Housekeeping (at most every five minutes in background ticks): erase
+   expired tombstones, then prune ingestion events, version history (events
+   first, because a version stays while an event names it as `version_after`)
+   and purge-log entries older than `purge_log_retention`.
 
 ## Retirement
 

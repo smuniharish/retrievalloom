@@ -5,9 +5,9 @@ text, but the questions people ask about them are about relationships: "who oper
 database behind Checkout, and where is it hosted?" The example builds a knowledge graph
 from the notes at ingest and answers questions from the graph and the text together.
 
-## Wiring
+## How it works
 
-- **`CapitalizedEntityExtractor`** (a custom `GraphExtractorABC`) turns capitalised phrases
+- **`CapitalizedEntityExtractor`** (a custom `GraphExtractorABC`) turns capitalized phrases
   into typed entities and sentences such as "Team Harbor operates Postgres" into
   `A OPERATES B` relationships.
 - **`AliasGraphNormalizer`** (a custom `GraphNormalizerABC`) case-folds names and resolves
@@ -80,7 +80,7 @@ Q: Which team leads the database behind Checkout and what happened in the incide
 ```
 
 `Postgres` is linked to all three notes, including the postmortem that only says "PG".
-That link is the alias normaliser at work. The fused answer mixes graph facts with the
+That link is the alias normalizer at work. The fused answer mixes graph facts with the
 passages that support them.
 
 Regex extraction is deliberately simple. In production an LLM- or NER-based

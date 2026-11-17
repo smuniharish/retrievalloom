@@ -1,10 +1,12 @@
 # Write your own backend
 
-Every pluggable part of the engine is an abstract base class (`abc.ABC`).
-Subclass it, pass an instance in `Components`, and the engine uses it in place
-of the default.
+Connect the database, search service or model you already run. Every part of
+the engine you can replace is defined by a small base class, called a
+*contract*. Subclass it, pass an instance in `Components`, and the engine uses
+it in place of the default. A ready-made test suite, the *contract kit*, then
+checks that your implementation behaves the way the engine expects.
 
-## Contracts
+## Implement the base members
 
 All contracts derive from `ComponentABC`
 (`retrievalloom.contracts.component`):
@@ -18,10 +20,12 @@ All contracts derive from `ComponentABC`
 
 `initialize` and `close` must be idempotent.
 
-The fingerprint matters for index backends and models: the engine stores it
-with each generation and treats a generation built with a different fingerprint
-as stale. Put every setting that changes the index content into `config` (or
+The fingerprint tells the engine when an index must be rebuilt: the engine
+stores it with each generation and treats a generation built with a different
+fingerprint as stale. Put every setting that changes the index content into `config` (or
 `model_identity`/`dimensions`).
+
+Pick the contract for the part you want to replace:
 
 | `Components` field | Contract | Module | Contract kit |
 | --- | --- | --- | --- |
@@ -53,11 +57,12 @@ normalizer you can pass to the score-based fusion classes in
 `WeightedScoreFusion(normalizer=...)`). The [API reference](../../api/contracts.md)
 documents every method.
 
-## Index backends
+## Implement an index backend
 
 Index backends implement `GenerationalIndexABC` plus a channel-specific
-`search`. The engine never edits a live index in an unsafe way: it creates a
-generation, writes items, seals it, and switches to it.
+`search`. You do not need to handle consistency yourself: the engine creates a
+generation, writes items, seals it, and switches to it, so searches never read
+a half-written index.
 
 | Method | Obligation |
 | --- | --- |
@@ -97,7 +102,7 @@ pip install "retrievalloom[testing]"
 ```
 
 Subclass the kit in a `Test*` class and implement `make_component`. pytest
-collects and runs every inherited check against your component, initialised
+collects and runs every inherited check against your component, initialized
 with a real `ComponentContext` and closed afterwards:
 
 ```python
@@ -125,7 +130,7 @@ Optional hooks:
 
 | Hook or attribute | Purpose |
 | --- | --- |
-| `prepare(component)` | Bring the initialised component into a usable state. `MetadataStoreContract` migrates the schema here. |
+| `prepare(component)` | Bring the initialized component into a usable state. `MetadataStoreContract` migrates the schema here. |
 | `resource_manager()` | Return a started resourcera `ResourceManager` to share between tests. Default: one per test. |
 | `EmbeddingModelContract.tolerance` | Absolute tolerance when comparing repeated embeddings (default `1e-4`). |
 | `RerankerContract.check_relevance` | Also require that the relevant passage scores highest (default `True`). |
@@ -137,3 +142,11 @@ component, and that `initialize` and `close` are idempotent.
 
 RetrievalLoom runs its own built-in backends against the same kits in
 `tests/contracts/`.
+
+## Next steps
+
+- Copy complete adapters for FlagEmbedding, sentence-transformers and others
+  from [Custom components](../../examples/adapters.md).
+- See every contract method in the [API reference](../../api/contracts.md).
+- Let a coding agent write the adapter with the
+  [`retrievalloom-extend` skill](../../agent-skills/index.md).

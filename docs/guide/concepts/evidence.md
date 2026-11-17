@@ -1,11 +1,14 @@
 # Evidence and provenance
 
-`retrieve` returns a `RetrievalResult`. Its `evidence` tuple is the answer:
-ordered `Evidence` items, best first.
+Cite every answer and show users where it came from. `retrieve` returns a
+`RetrievalResult` whose `evidence` tuple holds the results, best first. Each
+`Evidence` item carries its text, its score, the exact document version and
+location it came from, and a record of how it was found.
 
 ## Evidence
 
-An evidence item groups one or more candidates that belong together. The
+An evidence item groups matching passages that belong together, so you get
+one coherent result instead of several fragments of the same section. The
 default `HierarchicalConsolidator` merges candidates of the same document
 version and representation that:
 
@@ -29,13 +32,14 @@ claim by the NLI model.
 | `sources` | Every `SourceReference` of the members. |
 | `relations` | Relations between members (`identical`, `span_overlap`, `same_section`, `parent_child`, `complementary`, ...). |
 | `linked_evidence_ids` | Other items related to this one, for example by a contradiction. |
-| `nli_summary` | Counts of entailment, contradiction and neutral judgements. |
+| `nli_summary` | Counts of entailment, contradiction and neutral judgments. |
 | `completeness` | Members without a span, from a superseded version, or with partial coverage. |
 | `provenance` | Sources, all method hits and the stage trail. |
 
 ## Sources
 
-A `SourceReference` names exactly where a segment came from:
+A `SourceReference` names exactly where a passage came from, so you can link
+to it or quote it:
 
 - `scope`, `document_id`, `document_uid`, `document_version`
 - `representation_id` and `object_id`
@@ -43,12 +47,13 @@ A `SourceReference` names exactly where a segment came from:
 - `source_uri` and `title` from the document's `SourceDescriptor`
 - `transformation` from the representation's `TransformationRef`
 
-RetrievalLoom never invents locations. A chunk without a `span` input has no
+RetrievalLoom never guesses locations. A chunk without a `span` input has no
 span in its source, and its object id appears in `completeness.missing_spans`.
 
 ## Provenance
 
-`Evidence.provenance` explains how the item was found:
+`Evidence.provenance` explains how the item was found, which helps you debug
+ranking and audit answers:
 
 - `hits`: every `RetrievalHit` behind the members. Each hit has the method
   (`hit.method.key`, for example `index.sparse`), the backend id, the raw
@@ -70,12 +75,17 @@ for item in result.evidence:
     print([stage.stage for stage in item.provenance.stage_trail])
 ```
 
-## Recording provenance elsewhere
+## Record provenance in an audit trail
 
 After each retrieval, `Components.provenance_recorder` receives the request
-and the result. The default records nothing, unless you pass an AGXAI runtime
+and the result. The default records nothing, unless you pass an agxai runtime
 as `EngineResources(xai_runtime=...)`. The
-[AGXAI integration](../../integrations/agxai.md) then records retrievals in the
-active AGXAI run. A recorder failure adds a
+[agxai integration](../../integrations/agxai.md) then records retrievals in the
+active agxai run. A recorder failure adds a
 `provenance_recording_failed` warning, or raises `ProvenanceError` when
 `fail_on_recording_error=True`.
+
+## Next steps
+
+- Learn how indexes stay current in [Generations and coverage](lifecycle.md).
+- Record searches in an audit trail with the [agxai integration](../../integrations/agxai.md).

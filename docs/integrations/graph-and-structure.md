@@ -1,7 +1,9 @@
 # LadybugDB and TreeSearch
 
-The graph and structure channels are off by default. Their default backends
-come from optional extras.
+Answer questions about connected entities, and find sections of long documents
+by their titles. The graph channel searches a knowledge graph stored in
+LadybugDB; the structure channel searches section trees with TreeSearch. Both
+are off by default, and their backends come from optional extras:
 
 ```bash
 pip install "retrievalloom[graph]"      # LadybugDB
@@ -9,7 +11,9 @@ pip install "retrievalloom[structure]"  # TreeSearch
 pip install "retrievalloom[all]"        # both
 ```
 
-Enable the channels in `RetrievalConfig.channels`:
+## Enable the channels
+
+Turn them on in `RetrievalConfig.channels`:
 
 ```python
 from retrievalloom import (
@@ -46,7 +50,7 @@ database.
   `data_dir/graph/graph.lbug` when `data_dir` is set.
 - Entities and relationships are both nodes; a relationship links to its
   endpoints, so one entity hop is two edge hops.
-- Every query is parameterised with the scope key and generation id.
+- Every query is parameterized with the scope key and generation id.
 - All access goes through one connection on a dedicated single thread
   (LadybugDB has a single writer), through the offloader as
   `WorkloadKind.GRAPH_QUERY`.
@@ -61,7 +65,7 @@ The default retriever, `NeighborhoodGraphRetriever(depth=1, max_ngram=4,
 seed_limit=20)`, finds entities whose name or alias equals a query n-gram
 (seeds, score 1.0) and expands `depth` entity hops; a node at distance `d`
 scores `1 / (1 + d)`. `GraphChannelConfig.depth` (1 to 4) sets its depth. The
-default normaliser, `IdentityGraphNormalizer`, merges entities of one type with
+default normalizer, `IdentityGraphNormalizer`, merges entities of one type with
 the same folded key or name.
 
 Graph input comes from `GraphRepresentation` documents or from a
@@ -88,11 +92,15 @@ Neither backend pushes filters down. Filters are applied after the search, and
 results carry a `filter_post_applied` info warning. Expect fewer than
 `candidate_k` hits with selective filters.
 
-## Your own backends
+## Use your own backends
 
-Implement `GraphStoreABC`, `GraphRetrieverABC`, `GraphNormalizerABC`,
+To use a graph database you already run, such as Neo4j, implement `GraphStoreABC`, `GraphRetrieverABC`, `GraphNormalizerABC`,
 `GraphExtractorABC` or `StructureEngineABC` and pass them in `Components`. See
-[Write a custom backend](../guide/how-to/custom-backends.md).
+[Write your own backend](../guide/how-to/custom-backends.md).
 
-See the [knowledge graph](../examples/knowledge-graph.md) and
-[policy manual](../examples/policy-manual.md) examples.
+## Next steps
+
+- Run the [knowledge graph](../examples/knowledge-graph.md) and
+  [policy manual](../examples/policy-manual.md) examples.
+- Learn how the graph and structure channels rank results in
+  [Channels and methods](../guide/concepts/channels.md).

@@ -32,6 +32,8 @@ KIND_FIELD = "_kind"
 DOCUMENT_ID_FIELD = "_id"
 DATASET_FIELD = "_dataset"
 VERSION_FIELD = "_version"
+# Prefix of graph-derivation marker ids (``graph_marker_id``); aggregates use ``obj``.
+_GRAPH_MARKER = "gmark"
 
 
 def document_filter_record(record: DocumentRecord) -> dict[str, Any]:
@@ -258,6 +260,32 @@ def relationship_id(
         "obj", scope.key, ObjectKind.GRAPH_RELATIONSHIP.value, source_id, relation_type,
         target_id, qualifier or "",
     )  # fmt: skip
+
+
+def graph_marker_id(document_uid: str) -> str:
+    """Object id of the graph-derivation marker of a document.
+
+    The marker is a contribution row (never an aggregate) whose version records the
+    document version the graph contributions were derived from.
+    """
+    return stable_id(_GRAPH_MARKER, document_uid)
+
+
+def is_graph_marker(object_id: str) -> bool:
+    """Whether ``object_id`` is a graph-derivation marker rather than an aggregate."""
+    return object_id.startswith(f"{_GRAPH_MARKER}_")
+
+
+def graph_marker(record: DocumentRecord) -> ObjectContribution:
+    """Marker recording that the graph of ``record``'s version has been derived."""
+    return ObjectContribution(
+        object_id=graph_marker_id(record.document_uid),
+        document_uid=record.document_uid,
+        version=record.version,
+        field_path="derived",
+        ordinal=0,
+        value=None,
+    )
 
 
 def graph_contributions(

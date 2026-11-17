@@ -9,15 +9,15 @@ store only through these fine-grained transactional methods.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Self
 
 from retrievalloom.contracts.component import ComponentABC
-from retrievalloom.domain.base import FrozenModel
+from retrievalloom.domain.base import FrozenModel, utc_now
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
-    from datetime import datetime
     from types import TracebackType
 
     from retrievalloom.domain.inputs import Scope
@@ -69,6 +69,31 @@ class PointerRow(FrozenModel):
     row_revision: int
 
 
+class KeywordDictionaryState(FrozenModel):
+    """A metadata keyword dictionary maintained by the store for one scope.
+
+    ``fields`` are the metadata fields whose string values are terms. ``revision``
+    increases whenever a term appears in or disappears from the dictionary.
+    """
+
+    dictionary_id: str
+    fields: tuple[str, ...]
+    revision: int
+
+
+class PurgeLogEntry(FrozenModel):
+    """One physically erased document, for engines evicting it from in-memory indexes.
+
+    ``seq`` is dense and increasing per scope in commit order.
+    """
+
+    scope_key: str
+    seq: int
+    document_uid: str
+    object_ids: tuple[str, ...]
+    purged_at: datetime
+
+
 class StoredRefreshState(FrozenModel):
     """Serialised refresh-engine resource state."""
 
@@ -115,6 +140,17 @@ class MetadataTransactionABC(ABC):
     async def current_commit_seq(self) -> int:
         """Return the current commit sequence."""
 
+    async def snapshot_marker(self, scope_key: str) -> tuple[int, str | None]:
+        """The current commit sequence and the snapshot token of ``scope_key``.
+
+        The token must change whenever a committed write changes the scope's documents,
+        coverage, generations or pointers, so that two reads returning the same token
+        see the same document counts, coverage counts, pointers and generations; readers
+        may then reuse what they read before. ``None`` (the default) disables that reuse.
+        """
+        del scope_key
+        return await self.current_commit_seq(), None
+
     # documents --------------------------------------------------------------------
     @abstractmethod
     async def get_document(self, scope: Scope, document_id: str) -> DocumentRecord | None:
@@ -125,6 +161,13 @@ class MetadataTransactionABC(ABC):
         self, scope_key: str, document_uids: Sequence[str]
     ) -> Mapping[str, DocumentRecord]:
         """Load documents by uid."""
+
+    async def get_change_seqs(
+        self, scope_key: str, document_uids: Sequence[str]
+    ) -> Mapping[str, int]:
+        """``change_seq`` of the documents in ``document_uids`` that exist (a narrow load)."""
+        documents = await self.get_documents_by_uid(scope_key, document_uids)
+        return {uid: document.change_seq for uid, document in documents.items()}
 
     @abstractmethod
     async def get_documents(
@@ -167,6 +210,17 @@ class MetadataTransactionABC(ABC):
         """Page through ``(document_id, metadata)`` pairs ordered by ``document_id``.
 
         A lighter ``list_documents`` for callers that only read metadata.
+        """
+
+    @abstractmethod
+    async def list_changed_documents(
+        self, scope_key: str, *, after_seq: int, limit: int = 1000
+    ) -> Sequence[DocumentRecord]:
+        """Documents (any state) whose ``change_seq`` exceeds ``after_seq``.
+
+        Ordered by ``(change_seq, document_uid)``. A page never splits the documents
+        sharing a ``change_seq``: it ends with every document of its last
+        ``change_seq``, so it may hold more than ``limit`` documents.
         """
 
     @abstractmethod
@@ -294,6 +348,19 @@ class MetadataTransactionABC(ABC):
     ) -> int:
         """Change the state of a document's objects."""
 
+    async def set_documents_objects_state(
+        self, scope_key: str, targets: Mapping[str, int | None], state: ObjectState
+    ) -> None:
+        """``set_document_objects_state`` for many ``document_uid -> exclude_version``.
+
+        ``None`` changes every object of the document. The default calls the singular
+        method once per document; stores should override it with a batched form.
+        """
+        for document_uid, exclude_version in targets.items():
+            await self.set_document_objects_state(
+                scope_key, document_uid, state, exclude_version=exclude_version
+            )
+
     @abstractmethod
     async def replace_contributions(
         self,
@@ -302,6 +369,18 @@ class MetadataTransactionABC(ABC):
         contributions: Sequence[ObjectContribution],
     ) -> Sequence[str]:
         """Replace every contribution of ``document_uid``; return affected object ids."""
+
+    async def retract_contributions(
+        self, scope_key: str, document_uids: Sequence[str]
+    ) -> Sequence[str]:
+        """Delete every contribution of the documents; return the affected object ids (sorted).
+
+        Equivalent to ``replace_contributions(scope_key, uid, [])`` for each document.
+        """
+        affected: set[str] = set()
+        for document_uid in dict.fromkeys(document_uids):
+            affected.update(await self.replace_contributions(scope_key, document_uid, []))
+        return sorted(affected)
 
     @abstractmethod
     async def get_contributions(
@@ -323,6 +402,19 @@ class MetadataTransactionABC(ABC):
     async def get_lineage(self, scope_key: str, object_id: str) -> Sequence[LineageEdge]:
         """Edges leaving or entering ``object_id``."""
 
+    async def get_lineage_many(
+        self, scope_key: str, object_ids: Sequence[str]
+    ) -> Sequence[LineageEdge]:
+        """Edges leaving or entering any of ``object_ids``, each edge once.
+
+        Ordered by ``(from_id, to_id, relation)``.
+        """
+        edges: dict[tuple[str, str, str], LineageEdge] = {}
+        for object_id in dict.fromkeys(object_ids):
+            for edge in await self.get_lineage(scope_key, object_id):
+                edges[(edge.from_id, edge.to_id, edge.relation.value)] = edge
+        return [edges[key] for key in sorted(edges)]
+
     # visibility -------------------------------------------------------------------
     @abstractmethod
     async def open_visibility(
@@ -343,6 +435,13 @@ class MetadataTransactionABC(ABC):
     @abstractmethod
     async def close_visibility(self, scope_key: str, document_uid: str, seq: int) -> None:
         """Close every open window of a document (all units)."""
+
+    async def close_visibility_many(
+        self, scope_key: str, document_uids: Sequence[str], seq: int
+    ) -> None:
+        """``close_visibility`` for many documents."""
+        for document_uid in dict.fromkeys(document_uids):
+            await self.close_visibility(scope_key, document_uid, seq)
 
     @abstractmethod
     async def visible_versions(
@@ -368,14 +467,20 @@ class MetadataTransactionABC(ABC):
         states: Sequence[CoverageState],
         *,
         limit: int = 1000,
+        after_document_uid: str | None = None,
     ) -> Sequence[CoverageRecord]:
-        """Coverage rows of a unit in the given states (ordered by document uid)."""
+        """Coverage rows of a unit in the given states (ordered by document uid).
+
+        ``after_document_uid`` pages: only rows with a greater document uid are returned.
+        """
 
     @abstractmethod
-    async def documents_missing_coverage(
-        self, unit: UnitKey, *, limit: int = 1000
-    ) -> Sequence[DocumentRecord]:
-        """Active documents without a coverage row for ``unit``."""
+    async def get_coverage_watermark(self, unit: UnitKey) -> int | None:
+        """The ``change_seq`` up to which ``unit`` has coverage rows; ``None`` before any."""
+
+    @abstractmethod
+    async def set_coverage_watermark(self, unit: UnitKey, change_seq: int) -> None:
+        """Record that every document with ``change_seq`` up to this has a coverage row."""
 
     @abstractmethod
     async def coverage_counts(
@@ -394,6 +499,38 @@ class MetadataTransactionABC(ABC):
         self, scope_key: str, targets: Mapping[str, int], state: CoverageState
     ) -> None:
         """``set_document_coverage_state`` for many ``document_uid -> target_version``."""
+
+    # keyword dictionaries ---------------------------------------------------------
+    @abstractmethod
+    async def list_keyword_dictionaries(self, scope_key: str) -> Sequence[KeywordDictionaryState]:
+        """Keyword dictionaries maintained in ``scope_key``."""
+
+    @abstractmethod
+    async def create_keyword_dictionary(
+        self,
+        scope_key: str,
+        dictionary_id: str,
+        fields: Sequence[str],
+        terms: Mapping[str, int],
+    ) -> None:
+        """Register a dictionary at revision 1 with its ``term -> document count`` rows.
+
+        Raises ``VersionConflictError`` when the dictionary already exists.
+        """
+
+    @abstractmethod
+    async def adjust_keyword_terms(
+        self, scope_key: str, dictionary_id: str, deltas: Mapping[str, int]
+    ) -> None:
+        """Add ``deltas`` to the document counts of terms.
+
+        A term whose count drops to zero or below is removed. The revision increases
+        when a term is added or removed. Unknown dictionaries are ignored.
+        """
+
+    @abstractmethod
+    async def list_keyword_terms(self, scope_key: str, dictionary_id: str) -> Sequence[str]:
+        """Terms of a dictionary, sorted."""
 
     # generations and pointers -----------------------------------------------------
     @abstractmethod
@@ -482,35 +619,78 @@ class MetadataTransactionABC(ABC):
     async def purge_instance(self, instance_id: str) -> None:
         """Delete every row owned by an engine instance.
 
-        Covers its coverage, visibility, pointers and generations of non-durable units,
-        its reader leases and its registration.
+        Covers its coverage, coverage watermarks, visibility, pointers and generations of
+        non-durable units, its reader leases and its registration.
         """
 
     # erasure and retention --------------------------------------------------------
     @abstractmethod
     async def list_purgeable_documents(
-        self, scope_key: str, *, deleted_before: datetime, limit: int = 1000
+        self,
+        scope_key: str,
+        *,
+        deleted_before: datetime,
+        limit: int = 1000,
+        methods: Sequence[tuple[str, str]] | None = None,
     ) -> Sequence[DocumentRecord]:
         """Tombstoned documents ready for physical erasure (ordered by document uid).
 
         A document qualifies when it was deleted strictly before ``deleted_before`` and
-        every coverage row it has (any unit, any instance) is ``deleted``.
+        every coverage row it has (any unit, any instance) is ``deleted``. With
+        ``methods``, only coverage rows of those ``(channel, method)`` pairs count, so
+        rows left behind by a unit that is no longer configured do not block erasure.
         """
 
-    @abstractmethod
     async def purge_document(
         self, scope_key: str, document_uid: str, *, object_ids: Sequence[str] = ()
     ) -> int:
-        """Physically delete every metadata row of a tombstoned document.
+        """Physically delete every metadata row of one tombstoned document.
 
-        Removes the document, its versions, representations, ingestion events, objects,
-        contributions, visibility windows and coverage rows, plus lineage edges touching
-        the document or any removed object. ``object_ids`` names further objects of the
-        scope to delete with their lineage (graph aggregates the document supported).
-        Idempotent; returns the number of rows deleted.
+        Same as :meth:`purge_documents` with one document, logged at the current time.
+        """
+        return await self.purge_documents(
+            scope_key, {document_uid: tuple(object_ids)}, purged_at=utc_now()
+        )
+
+    @abstractmethod
+    async def purge_documents(
+        self,
+        scope_key: str,
+        documents: Mapping[str, Sequence[str]],
+        *,
+        purged_at: datetime,
+    ) -> int:
+        """Physically delete every metadata row of tombstoned documents.
+
+        ``documents`` maps each document uid to further objects of the scope to delete
+        with it and their lineage (graph aggregates the document supported). For each
+        document this removes the document, its versions, representations, ingestion
+        events, objects, contributions, visibility windows and coverage rows, plus
+        lineage edges touching the document or any removed object. Every document that
+        still had its document row gets a purge-log entry (with the ids of the objects
+        removed for it) in the same transaction. Idempotent; returns the number of rows
+        deleted, purge-log entries excluded.
 
         Raises:
-            LifecycleError: The document exists and is not deleted.
+            LifecycleError: A document exists and is not deleted (nothing is deleted).
+        """
+
+    @abstractmethod
+    async def purge_log_heads(self) -> Mapping[str, int]:
+        """Newest purge-log sequence per scope that has purge-log entries."""
+
+    @abstractmethod
+    async def list_purge_log(
+        self, scope_key: str, *, after_seq: int, limit: int = 1000
+    ) -> Sequence[PurgeLogEntry]:
+        """Purge-log entries of a scope with ``seq > after_seq``, in sequence order."""
+
+    @abstractmethod
+    async def prune_purge_log(self, scope_key: str, *, before: datetime, limit: int = 1000) -> int:
+        """Delete up to ``limit`` purge-log entries logged before ``before``.
+
+        The newest entry of the scope is always kept, so sequences never restart and a
+        reader can tell that entries it has not seen were pruned.
         """
 
     @abstractmethod
@@ -519,9 +699,10 @@ class MetadataTransactionABC(ABC):
 
         For each document only the ``keep`` newest versions are kept. A version is never
         pruned when it is the document's current version, has a ``live`` derived object
-        or a contribution to a ``live`` aggregate, has an open visibility window, or is
+        or a contribution to a ``live`` aggregate, has an open visibility window, is
         the indexed version of a coverage row of an ``active`` or ``retiring``
-        generation. Deletes at most ``limit`` versions; returns how many were deleted.
+        generation, or is the ``version_after`` of a retained ingestion event of the
+        document. Deletes at most ``limit`` versions; returns how many were deleted.
         """
 
     @abstractmethod

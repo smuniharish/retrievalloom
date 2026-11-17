@@ -1,12 +1,13 @@
 # Quickstart
 
-This example creates an in-memory engine, ingests four short documents and retrieves
-evidence for a query. For each evidence item it prints the document version, the source
-URI and title, the methods that found it, the matched terms and the pipeline stages it
-passed through. It then repeats a retrieval with a metadata filter (`lang = "de"`).
+See everything a search result tells you, with no model or server. The example creates
+an in-memory engine, ingests four short documents and searches them. For each result it
+prints the document version, the source URI and title, the methods that found it, the
+matched terms and the pipeline stages it passed through. It then repeats the search with
+a metadata filter (`lang = "de"`).
 
-The engine uses its default components: an in-memory SQLite metadata store and the
-keyword, fuzzy and sparse (BM25) methods of the index channel. The keyword method reads
+The engine uses its default components: an in-memory SQLite metadata store and keyword,
+typo-tolerant (fuzzy) and BM25 (sparse) search. The keyword method reads
 canonical keywords from each document's `keywords` metadata field.
 
 Because no embedding model is configured, every result carries the informational

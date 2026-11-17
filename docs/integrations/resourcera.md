@@ -1,13 +1,14 @@
 # resourcera
 
-[resourcera](https://pypi.org/project/resourcera/) provides admission control.
-RetrievalLoom uses it in the [offloader](../guide/concepts/offloading.md):
-before a blocking job starts in a thread, the job reserves capacity from a
-resourcera `ResourceManager`. When the host is short of memory or CPU, jobs
-wait instead of piling up threads. A job that waits longer than
+Keep a busy host stable: when memory or CPU runs short, new background work
+waits instead of piling up threads.
+[resourcera](https://pypi.org/project/resourcera/) provides this admission
+control. RetrievalLoom uses it in the
+[offloader](../guide/concepts/offloading.md): before a blocking job starts in a
+thread, the job reserves capacity from a resourcera `ResourceManager`. A job that waits longer than
 `OffloaderConfig.admission_wait_timeout` fails with `ResourceAdmissionError`.
 
-## Engine-owned manager
+## Let the engine manage it
 
 By default the engine creates, starts and closes its own `ResourceManager`
 from `OffloaderConfig.resource_config`. The default raises resourcera's
@@ -39,7 +40,7 @@ config = EngineConfig(
 | `shutdown_timeout` | `30.0` | Seconds `close` waits for running threads. |
 | `resource_config` | `ResourceConfig(cpu_budget_fraction=0.05)` | Settings of the engine-owned manager. |
 
-## Application-owned manager
+## Share your own manager
 
 To share one manager between the engine and the rest of your application,
 start it yourself and pass it in `EngineResources`. The engine never starts or
@@ -66,3 +67,8 @@ asyncio.run(main())
 ```
 
 `resource_config` is ignored when you pass a manager.
+
+## Next steps
+
+- See how jobs are scheduled in [Offloading and admission](../guide/concepts/offloading.md).
+- Resolve `ResourceAdmissionError` with [Troubleshooting](../guide/troubleshooting.md).

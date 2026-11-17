@@ -198,6 +198,21 @@ async def test_recorder_receives_every_retrieval() -> None:
     assert len(recorder.ingestions) == 1
 
 
+async def test_sparse_query_carries_raw_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    async with ingested() as engine:
+        backend = unit(engine, SPARSE).backend
+        original = functools.partial(type(backend).search, backend)
+        queries: list[Any] = []
+
+        async def search(scope: Scope, generation: str, query: Any, *args: Any) -> Any:
+            queries.append(query)
+            return await original(scope, generation, query, *args)
+
+        monkeypatch.setattr(backend, "search", search)
+        await engine.retrieve("Asyncio Loops?", scope=ACME)
+    assert [(q.tokens, q.text) for q in queries] == [(("asyncio", "loops"), "Asyncio Loops?")]
+
+
 async def test_recorder_failure_degrades_or_fails() -> None:
     recorder = RecordingRecorder()
     async with ingested(components=Components(provenance_recorder=recorder)) as engine:

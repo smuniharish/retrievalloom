@@ -5,7 +5,7 @@ and the retrieval stack gains new methods and new embedding models. The example 
 scope of IT runbooks through three engine processes that share a durable `data_dir` (the
 SQLite metadata store). Dense vectors live in Postgres through the custom `PgVectorStore`.
 
-## Wiring
+## How it works
 
 1. **Lexical methods only.**
     - Ingest five runbooks.

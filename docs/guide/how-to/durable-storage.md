@@ -1,7 +1,9 @@
 # Keep data on disk
 
+Restart your service without re-ingesting or re-embedding a single document.
 By default everything lives in memory and disappears when the engine closes.
-Set `EngineResources(data_dir=...)` to keep it.
+Set `EngineResources(data_dir=...)` and the engine keeps documents and indexes
+on disk:
 
 ```python
 from pathlib import Path
@@ -20,11 +22,14 @@ With a `data_dir`, the default components store their data under it:
 | `LadybugGraphStore` | `data_dir/graph/graph.lbug` | The graph channel is enabled |
 | `TreeSearchStructureEngine` | `data_dir/structure/` | The structure channel is enabled |
 
-The keyword, fuzzy and sparse indexes are always in memory. On restart the
-engine rebuilds them from the metadata store
-(`LifecycleConfig.auto_rebuild_ephemeral`, default `True`). Durable backends
-are not rebuilt: the engine reconciles with the published generations and
-serves from them directly.
+## Restart quickly
+
+The keyword, fuzzy and sparse indexes are always in memory and are cheap to
+rebuild. On restart the engine rebuilds them from the metadata store
+(`LifecycleConfig.auto_rebuild_ephemeral`, default `True`). Vectors and other
+disk-backed indexes are not rebuilt: the engine picks up the indexes it
+published before and serves from them directly, so no document is embedded
+again.
 
 When the engine opens:
 
@@ -40,11 +45,11 @@ the wait. If the rebuild takes longer, the engine opens anyway, logs
 `startup_rebuild_timeout`, and the background rounds finish the rebuild.
 
 ```python
-from retrievalloom import LifecycleConfig
+from retrievalloom import EngineConfig, LifecycleConfig
 
 engine = RetrievalEngine(
+    EngineConfig(lifecycle=LifecycleConfig(wait_for_rebuild=True, rebuild_timeout=120)),
     resources=EngineResources(data_dir=data),
-    lifecycle=LifecycleConfig(wait_for_rebuild=True, rebuild_timeout=120),
 )
 ```
 
@@ -57,25 +62,33 @@ async with RetrievalEngine(resources=EngineResources(data_dir=data)) as engine:
 ```
 
 `wait_for_rebuild` is off by default so that a large rebuild never delays
-startup unexpectedly.
+startup unexpectedly. The rebuild takes about 1.5 ms and 20 KB of memory per
+document; see [Memory and restart time](../../benchmarks.md#memory-and-restart-time)
+for measurements up to 100,000 documents and sizing guidance.
 
-## Retention and erasure
+## Control retention and erasure
 
-The metadata store keeps history, and the maintenance round trims it (see
+The metadata store keeps document history so you can audit changes, and the
+background maintenance round trims it to the limits you set (see
 [Deletion, erasure and retention](../concepts/lifecycle.md#deletion-erasure-and-retention)):
 
 - `LifecycleConfig.max_versions` (default 10) caps the version history kept
-  per document.
+  per document. Versions named by a retained ingestion event are kept.
 - `LifecycleConfig.event_retention` (default 90 days) caps how long
   committed and failed ingestion events are kept.
 - `LifecycleConfig.purge_after` (default 7 days) erases deleted documents
   physically once they have been removed from the indexes.
-- `engine.purge(ids, scope=...)` erases documents immediately.
+- `engine.purge(ids, scope=...)` erases documents immediately, in batches of
+  up to 500 documents per transaction. Other engines on the store evict them
+  from their in-memory indexes at their next lifecycle round, through the
+  purge log.
+- `LifecycleConfig.purge_log_retention` (default 1 day) caps how long
+  purge-log entries are kept.
 
-## The metadata store
+## Configure the metadata store
 
-The metadata store is the source of truth: documents, versions, index
-objects, coverage, generations and lifecycle tasks. RetrievalLoom ships two
+The metadata store holds your documents, their versions and the indexing state,
+and every index is rebuilt from it. RetrievalLoom ships two
 implementations: `SQLiteMetadataStore` (SQLAlchemy async on `aiosqlite`, the
 default) and `PostgresMetadataStore` for engines on several hosts (see
 [A shared PostgreSQL store](#a-shared-postgresql-store)).
@@ -95,7 +108,7 @@ components = Components(metadata_store=store)
 | `busy_timeout_ms` | 30000 | SQLite busy timeout |
 | `engine` | `None` | An application-owned SQLAlchemy `AsyncEngine`; not disposed on close |
 
-The store uses WAL journaling, one serialised writer (`BEGIN IMMEDIATE`) and
+The store uses WAL journaling, one serialized writer (`BEGIN IMMEDIATE`) and
 concurrent readers.
 
 A store you pass in stays yours: close it with `await store.close()` once you
@@ -112,7 +125,8 @@ The schema is managed with Alembic migrations shipped in the package.
 
 ## A shared PostgreSQL store
 
-SQLite allows one writer at a time and only works for engines on one host.
+Use PostgreSQL when several hosts serve the same documents. SQLite allows one
+writer at a time and only works for engines on one host.
 To run engines on several hosts against one set of documents, keep the
 metadata in PostgreSQL. Install the extra first:
 
@@ -185,7 +199,8 @@ for the locking design.
 
 ## Qdrant on disk or on a server
 
-The default vector store in a `data_dir` is Qdrant in local mode. Local mode
+Vectors are the most expensive data to rebuild, so keep them in durable
+storage. The default vector store in a `data_dir` is Qdrant in local mode. Local mode
 locks its directory: only one process can open it. For several processes, or
 for production data, use a Qdrant server:
 
@@ -217,9 +232,16 @@ single owner process, or implement `GraphStoreABC` on a server database such
 as Neo4j and pass it as `Components(graph_store=...)`. See
 [Write your own backend](custom-backends.md).
 
-## Ownership rules
+## Who closes what
 
 - Components the engine creates are closed by the engine.
 - Components and resources you pass in are never closed by the engine. Close
   them yourself once you stop using them.
 - `data_dir` itself is never deleted.
+
+## Next steps
+
+- Serve one corpus from several processes in
+  [Run several engines on one store](multiple-engines.md).
+- See a restart without re-embedding in the
+  [durable restart example](../../examples/durable-restart.md).

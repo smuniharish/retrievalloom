@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import heapq
 import math
 from collections import Counter
 from dataclasses import dataclass, field
@@ -9,7 +10,6 @@ from typing import TYPE_CHECKING
 
 from retrievalloom.contracts.component import ComponentInfo, make_info
 from retrievalloom.contracts.indexes import KeywordIndexABC
-from retrievalloom.domain.filters import evaluate
 from retrievalloom.domain.inputs import TextSpan
 from retrievalloom.domain.records import Channel
 from retrievalloom.domain.retrieval import (
@@ -113,16 +113,10 @@ class AhoCorasickKeywordIndex(KeywordIndexABC, InMemoryGenerationalIndex):
         for canonical, surface, start, end in structure.matcher.find(query.text):
             matched.setdefault(canonical, (surface, start, end))
         document_count = len(structure.forward)
-        scores: dict[str, float] = {}
-        details: dict[str, list[MatchDetail]] = {}
+        terms: list[tuple[dict[str, int], float, MatchDetail]] = []
         for canonical, (surface, start, end) in matched.items():
-            posting = structure.postings.get(canonical, {})
-            passing = [
-                object_id
-                for object_id in posting
-                if evaluate(filters, generation.metadata.get(object_id, {}))
-            ]
-            if not passing:
+            posting = structure.postings.get(canonical)
+            if not posting:
                 continue
             idf = math.log(1.0 + document_count / len(posting))
             detail = MatchDetail(
@@ -132,10 +126,23 @@ class AhoCorasickKeywordIndex(KeywordIndexABC, InMemoryGenerationalIndex):
                 query_span=TextSpan(start=start, end=end) if spans_valid else None,
                 score=idf,
             )
-            for object_id in passing:
+            terms.append((posting, idf, detail))
+        # Scores are accumulated per posting; filters are evaluated once per object and
+        # details built only for the top hits.
+        scores: dict[str, float] = {}
+        for posting, idf, _detail in terms:
+            for object_id in posting:
                 scores[object_id] = scores.get(object_id, 0.0) + idf
-                details.setdefault(object_id, []).append(detail)
-        ordered = sorted(scores.items(), key=lambda pair: (-pair[1], pair[0]))[:limit]
+        top = heapq.nsmallest(
+            limit,
+            generation.matching(scores, filters),
+            key=lambda object_id: (-scores[object_id], object_id),
+        )
+        ordered = [(object_id, scores[object_id]) for object_id in top]
+        details = {
+            object_id: [detail for posting, _idf, detail in terms if object_id in posting]
+            for object_id in top
+        }
         return [
             RetrievalHit(
                 object_ref=ObjectRef(

@@ -162,6 +162,44 @@ def test_policy_manual() -> None:
     assert all(int(line.split()[4]) <= 2 for line in caps)
 
 
+@pytest.mark.graph
+@pytest.mark.structure
+@requires_graph
+@requires_structure
+def test_channel_combinations() -> None:
+    lines = run_example("channel_combinations")
+    assert after(lines, "1. index only", 1) == ["   complete ['db-failover[index]']"]
+    assert after(lines, "2. structure turned on later (caught up while the engine opens)", 3) == [
+        "   index.keyword: {'ready': 3}",
+        "   structure.structure: {'ready': 3}",
+        "   complete ['db-failover[structure]', 'db-failover[index]', 'db-failover[structure]']",
+    ]
+    (before,) = after(lines, "   before backfill:", 1)
+    assert before.startswith("   partial ['db-failover[structure]'"), before
+    assert "'index_missing:graph'" in before
+    assert after(lines, "   after backfill:", 2) == [
+        "   graph.graph: {'ready': 3}",
+        "   complete ['db-failover[graph]', 'db-failover[structure]', 'db-failover[index]', "
+        "'db-failover[graph]']",
+    ]
+    combos = after(lines, "4. every combination on the same store", 8)
+    for line in combos[:7]:
+        enabled, answered = line.split(" answered by ")
+        expected = sorted(enabled.strip().split(" + "))
+        assert answered == repr(expected), line
+    assert combos[7].split() == ["nothing", "enabled", "rejected"]
+    for channel in ("index", "structure", "graph"):
+        (answer,) = after(lines, f"   {channel}:", 1)
+        assert answer.startswith(f'   complete ["db-failover[{channel}] '), answer
+    disabled = after(lines, "6. graph off; vpn-access deleted meanwhile", 1)[0]
+    assert "graph" not in disabled
+    assert "vpn-access" not in disabled
+    reenabled = after(lines, "   graph on again (the startup round catches up)", 2)
+    assert reenabled[0] == "   graph.graph: {'deleted': 1, 'ready': 2}"
+    assert "cache-flush[graph]" in reenabled[1]
+    assert "vpn-access" not in reenabled[1]
+
+
 GRAPH_FIRST_QUESTION = "Q: Who operates Postgres and where is it hosted? (graph channel only)"
 
 

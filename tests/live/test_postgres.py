@@ -32,7 +32,7 @@ from retrievalloom.domain.records import (
     TaskKind,
     TaskState,
 )
-from retrievalloom.domain.retrieval import ResultStatus
+from retrievalloom.domain.retrieval import ResultStatus, RetrievalExecutionConfig
 from retrievalloom.errors import (
     BackendTimeoutError,
     BackendUnavailableError,
@@ -40,6 +40,7 @@ from retrievalloom.errors import (
     ValidationError,
     VersionConflictError,
 )
+from retrievalloom.index.memory import InMemoryGenerationalIndex
 from retrievalloom.storage import schema as tables
 from retrievalloom.storage.base import MigrationPolicy
 from retrievalloom.storage.postgres import PostgresMetadataStore
@@ -551,3 +552,131 @@ async def test_engines_share_one_store_concurrently(schema: str) -> None:
     finally:
         for engine in engines:
             await engine.__aexit__(None, None, None)
+
+
+ONLY = {
+    method: RetrievalExecutionConfig(
+        keyword=method == "keyword",
+        fuzzy=method == "fuzzy",
+        sparse=method == "sparse",
+        dense=method == "dense",
+        graph=False,
+        structure=False,
+    )
+    for method in ("keyword", "fuzzy", "sparse", "dense")
+}
+
+
+def keyword_doc(document_id: str, text: str, keyword: str) -> DocumentInput:
+    """Single-text document carrying one keyword for the keyword method."""
+    return DocumentInput.model_validate(
+        {
+            "_id": document_id,
+            "representations": (TextRepresentation(text=text),),
+            "metadata": {"keywords": [keyword]},
+        }
+    )
+
+
+async def found_by(engine: RetrievalEngine, query: str) -> dict[str, set[str]]:
+    """Document ids retrieved for ``query`` by each in-memory method on its own."""
+    hits: dict[str, set[str]] = {}
+    for method, config in ONLY.items():
+        result = await engine.retrieve(query, scope=SCOPE, top_k=50, config=config)
+        hits[method] = {source.document_id for item in result.evidence for source in item.sources}
+    return hits
+
+
+async def eventually(check: Any, limit: float = 30.0) -> float:
+    """Seconds until ``await check()`` is true (fails after ``limit`` seconds)."""
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    while not await check():
+        assert loop.time() - start < limit, "condition not reached in time"
+        await asyncio.sleep(0.05)
+    return loop.time() - start
+
+
+async def object_ids_of(schema: str, document_id: str) -> set[str]:
+    """Ids of the objects derived from ``document_id`` in ``SCOPE``."""
+    inspector = store(schema)
+    await inspector.initialize()
+    try:
+        async with inspector.transaction(SCOPE, write=False) as tx:
+            record = await tx.get_document(SCOPE, document_id)
+            assert record is not None
+            objects = await tx.list_document_objects(SCOPE.key, record.document_uid)
+    finally:
+        await inspector.close()
+    return {item.object_id for item in objects}
+
+
+def held(engine: RetrievalEngine, object_ids: set[str]) -> dict[str, set[str]]:
+    """Per engine-local in-memory unit: which of ``object_ids`` any generation still holds."""
+    runtime = engine._runtime
+    assert runtime is not None
+    holding: dict[str, set[str]] = {}
+    for name, unit in runtime.units.items():
+        backend = unit.backend
+        if unit.instance and isinstance(backend, InMemoryGenerationalIndex):
+            holding[name] = {
+                object_id
+                for (scope_key, _), generation in backend._generations.items()
+                if scope_key == SCOPE.key
+                for object_id in generation.metadata
+                if object_id in object_ids
+            }
+    assert {name.split(".")[-1] for name in holding} == {"keyword", "fuzzy", "sparse"}
+    return holding
+
+
+async def test_purge_evicts_from_other_engines_in_memory_indexes(schema: str) -> None:
+    """A purge on one engine reaches the in-memory indexes of every engine sharing the store."""
+    purger = engine_on(schema)
+    foreground = engine_on(schema)
+    metadata_store = store(schema)
+    _SUPPLIED.append(metadata_store)
+    background = make_engine(
+        components=Components(metadata_store=metadata_store, embedding=HashEmbedding()),
+        lifecycle=LifecycleConfig(background=True, poll_interval=0.2),
+    )
+    query = "confidential salary spreadsheet"
+    async with purger, foreground, background:
+        await purger.ingest(
+            [
+                keyword_doc("secret", "confidential salary spreadsheet of the board", "salary"),
+                keyword_doc("keep", "public holiday spreadsheet", "spreadsheet"),
+            ],
+            scope=SCOPE,
+        )
+        await foreground.run_lifecycle_once()
+
+        async def everyone_serves_secret() -> bool:
+            for engine in (purger, foreground, background):
+                hits = await found_by(engine, query)
+                if any("secret" not in ids for ids in hits.values()):
+                    return False
+            return True
+
+        await eventually(everyone_serves_secret)
+
+        secret_ids = await object_ids_of(schema, "secret")
+        for engine in (purger, foreground, background):
+            assert all(held(engine, secret_ids).values())  # every in-memory method holds it
+
+        report = await purger.purge(["secret"], scope=SCOPE)
+        assert report.purged == ("secret",)
+        assert not any(held(purger, secret_ids).values())
+        assert all(held(foreground, secret_ids).values())  # until its next lifecycle call
+
+        async def background_evicted() -> bool:
+            return not any(held(background, secret_ids).values())
+
+        latency = await eventually(background_evicted, limit=10.0)
+        assert latency < 5.0  # one poll interval plus the round, with ample slack
+        await foreground.run_lifecycle_once()  # the foreground mode evicts on lifecycle calls
+        assert not any(held(foreground, secret_ids).values())
+        for engine in (purger, foreground, background):
+            hits = await found_by(engine, query)
+            assert all("secret" not in ids for ids in hits.values())
+            assert all("keep" in ids for ids in hits.values())

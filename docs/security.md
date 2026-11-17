@@ -1,11 +1,12 @@
 # Security
 
-RetrievalLoom stores your documents, their derived indexes, and the evidence
-it returns, so its stores are as sensitive as the source content. This page
-lists what the library enforces by itself and what a deployment must still
-decide.
+Deploy RetrievalLoom with confidence that one customer never sees another's
+data, and know exactly which decisions remain yours. RetrievalLoom stores your
+documents and the indexes built from them, so its stores are as sensitive as
+the source content. This page lists what the library enforces by itself, what
+your deployment must still decide, and how stored data is erased.
 
-## Built in
+## What RetrievalLoom enforces
 
 - **Scope isolation.** Every operation names a `Scope` (tenant, namespace, and
   collection). The metadata store binds each transaction to one scope and
@@ -42,6 +43,9 @@ decide.
 
 ## Your responsibilities
 
+The library cannot know who your callers are or where your data lives. Decide
+these in your deployment:
+
 | Area | What to do |
 | --- | --- |
 | Authorization | The default `AllowAllAccessPolicy` is **not** a security control: any caller that can reach the engine can use any scope. Authenticate callers in your application, pass their identity as `principal`, and supply an `AccessPolicyABC` that enforces your rules. |
@@ -54,28 +58,51 @@ decide.
 
 ## Erasure and retention
 
+You can honor erasure requests completely: `purge` removes a document from
+every index and from the metadata store.
+
 - **`delete` is a tombstone.** It hides a document from retrieval at once, and
   the index lifecycle then removes its index entries. The metadata store keeps
   its versions, representations, events and objects.
 - **`purge` erases.** `await engine.purge(ids, scope=..., principal=...)`
   removes the documents' objects from every generation of this engine's
-  indexes, then deletes every metadata row of the documents in one
-  transaction per document. It never reports a document as purged while a
-  backend removal failed: on a backend error nothing is deleted from the
-  metadata store and the call raises, so it can be retried. It is idempotent.
+  indexes, then deletes every metadata row of the documents, in batches of up
+  to 500 documents per write transaction. It never reports a document as
+  purged while a backend removal failed: on a backend error nothing of the
+  batch is deleted from the metadata store and the call raises, so it can be
+  retried. It is idempotent.
+- **Other engines follow.** The same transaction appends one entry per
+  document to a purge log in the metadata store. Every engine sharing the
+  store reads the log at the start of each lifecycle round and removes the
+  purged objects from its own in-memory indexes (see
+  [eviction latency](#eviction-latency) below).
 - **Tombstones expire.** Maintenance erases deleted documents the same way
   after `LifecycleConfig.purge_after` (default 7 days), once every index unit
   has removed them.
 - **History is bounded.** `max_versions` (default 10) caps each document's
   version history and `event_retention` (default 90 days) caps ingestion
-  events. Set them to match your retention policy.
+  events. A version named by a retained ingestion event is kept until the
+  event expires. Purge-log entries are kept for `purge_log_retention`
+  (default 1 day). Set them to match your retention policy.
+
+### Eviction latency
+
+Retrieval never returns purged documents from any engine, because evidence is
+hydrated from the metadata store. Their index entries leave the process memory
+of other engines as follows:
+
+- With `background=True` (the default), within about `poll_interval`
+  (default 2 s) plus the duration of the current lifecycle round. Eviction
+  waits for an index build of the same unit to finish.
+- With `background=False`, at the engine's next lifecycle call: its own
+  `ingest`, `delete` or `purge` (unless `index_wait="none"`), `wait_for`, or
+  `run_lifecycle_once()`. Call `run_lifecycle_once()` periodically.
+- An engine that misses entries because they were pruned before it applied
+  them (it ran no round for `purge_log_retention`) rebuilds its in-memory
+  indexes of the scope from the metadata store instead.
 
 Limits to plan for:
 
-- Other engines' in-memory (ephemeral) indexes keep purged entries until they
-  restart or rebuild. Retrieval never returns them, because evidence is
-  hydrated from the metadata store, but the data stays in their process
-  memory. Restart them or run `rebuild` there when erasure must be complete.
 - A graph aggregate that other documents still support stays in the active
   graph generation until the queued graph rebuild publishes a new one. Wait
   for the task ids in `PurgeReport.task_ids`.

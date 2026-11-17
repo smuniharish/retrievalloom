@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import heapq
 import sys
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from cachetools import LRUCache
 from rapidfuzz import fuzz, process
 
 from retrievalloom.contracts.component import ComponentInfo, make_info
 from retrievalloom.contracts.indexes import FuzzyIndexABC
-from retrievalloom.domain.filters import evaluate
 from retrievalloom.domain.records import Channel
 from retrievalloom.domain.retrieval import (
     MatchDetail,
@@ -36,8 +37,12 @@ if TYPE_CHECKING:
 _METHOD = MethodRef(channel=Channel.INDEX, method="fuzzy")
 _SEMANTICS = ScoreSemantics(higher_is_better=True, range=ScoreRange.UNBOUNDED)
 _MATCHES_PER_NGRAM = 5
+# Query n-grams whose matches each generation memoises.
+_MATCH_CACHE_SIZE = 4096
 # rapidfuzz's overloaded scorer stubs do not satisfy its own extract() overloads.
 _SCORER: Any = fuzz.WRatio
+
+type _GramMatches = tuple[tuple[str, float], ...]
 
 
 @dataclass(slots=True)
@@ -50,6 +55,11 @@ class _FuzzyStructure:
     vocabulary: list[str] = field(default_factory=list)
     added: set[str] = field(default_factory=set)
     removed: set[str] = field(default_factory=set)
+    # Top matches per query n-gram against ``matched_against`` (LRU).
+    matched_against: list[str] | None = None
+    matches: LRUCache[str, _GramMatches] = field(
+        default_factory=lambda: LRUCache(maxsize=_MATCH_CACHE_SIZE)
+    )
 
     def sorted_vocabulary(self) -> list[str]:
         """The sorted vocabulary; a new list after changes, so readers keep a stable one."""
@@ -190,7 +200,7 @@ class RapidFuzzIndex(FuzzyIndexABC, InMemoryGenerationalIndex):
                     grams.append(gram)
         return grams
 
-    def _match_sync(self, vocabulary: list[str], grams: list[str]) -> dict[str, tuple]:
+    def _match_sync(self, vocabulary: list[str], grams: list[str]) -> list[_GramMatches]:
         # cdist releases the GIL while scoring (process.extract does not), so the
         # offloaded match cannot stall the application's event loop.
         matrix = process.cdist(
@@ -201,12 +211,53 @@ class RapidFuzzIndex(FuzzyIndexABC, InMemoryGenerationalIndex):
             dtype=np.float64,
             workers=1,
         )
-        best: dict[str, tuple[float, str]] = {}
-        for gram, row in zip(grams, matrix, strict=True):
+        matches: list[_GramMatches] = []
+        for row in matrix:
             candidates = np.flatnonzero(row >= self._cutoff).tolist()
             candidates.sort(key=lambda index: (-row[index], index))
-            for index in candidates[:_MATCHES_PER_NGRAM]:
-                term, similarity = vocabulary[index], float(row[index])
+            matches.append(
+                tuple(
+                    (vocabulary[index], float(row[index]))
+                    for index in candidates[:_MATCHES_PER_NGRAM]
+                )
+            )
+        return matches
+
+    async def _matches(
+        self, scope: Scope, structure: _FuzzyStructure, grams: list[str]
+    ) -> dict[str, tuple[float, str]]:
+        """Best ``(similarity, gram)`` per matched term; per-gram results are memoised.
+
+        The vocabulary list is replaced (never mutated) when terms change, so results
+        memoised against the current list are exactly what matching would return.
+        """
+        vocabulary = structure.sorted_vocabulary()
+        if structure.matched_against is not vocabulary:
+            structure.matched_against = vocabulary
+            structure.matches.clear()
+        cache = structure.matches
+        results: dict[str, _GramMatches] = {}
+        for gram in grams:
+            hit = cache.get(gram)
+            if hit is not None:
+                results[gram] = hit
+        missing = [gram for gram in grams if gram not in results]
+        if missing:
+            found = await self.offloader.run(
+                WorkloadKind.FUZZY_MATCH,
+                self._match_sync,
+                vocabulary,
+                missing,
+                tenant=scope.tenant_id,
+            )
+            results.update(zip(missing, found, strict=True))
+            # The vocabulary may have changed while matching ran; matches against the old
+            # list must not be memoised for the new one.
+            if structure.matched_against is vocabulary:
+                cache.update(zip(missing, found, strict=True))
+        best: dict[str, tuple[float, str]] = {}
+        for gram in grams:
+            for term, similarity in results[gram]:
                 if term not in best or similarity > best[term][0]:
                     best[term] = (similarity, gram)
         return best
@@ -223,23 +274,34 @@ class RapidFuzzIndex(FuzzyIndexABC, InMemoryGenerationalIndex):
         generation = self.sealed_generation(scope, generation_id)
         structure: _FuzzyStructure = generation.built
         grams = self._ngrams([fold(token) for token in query.tokens])
-        vocabulary = structure.sorted_vocabulary()
-        if not grams or not vocabulary:
+        if not grams or not structure.sorted_vocabulary():
             return []
-        best = await self.offloader.run(
-            WorkloadKind.FUZZY_MATCH, self._match_sync, vocabulary, grams, tenant=scope.tenant_id
-        )
+        best = await self._matches(scope, structure, grams)
+        # A term removed while matching ran has no posting any more.
+        matched = [
+            (
+                structure.postings.get(term, set()),
+                similarity / 100.0,
+                MatchDetail(kind="fuzzy", term=gram, matched=term, score=similarity),
+            )
+            for term, (similarity, gram) in sorted(best.items())
+        ]
+        # Common terms post to most of the corpus, so only scores are accumulated per
+        # posting; filters are evaluated once per object and details built for the top hits.
         scores: dict[str, float] = {}
-        details: dict[str, list[MatchDetail]] = {}
-        for term, (similarity, gram) in sorted(best.items()):
-            detail = MatchDetail(kind="fuzzy", term=gram, matched=term, score=similarity)
-            # A term removed while matching ran has no posting any more.
-            for object_id in structure.postings.get(term, ()):
-                if not evaluate(filters, generation.metadata.get(object_id, {})):
-                    continue
-                scores[object_id] = scores.get(object_id, 0.0) + similarity / 100.0
-                details.setdefault(object_id, []).append(detail)
-        ordered = sorted(scores.items(), key=lambda pair: (-pair[1], pair[0]))[:limit]
+        for posting, weight, _detail in matched:
+            for object_id in posting:
+                scores[object_id] = scores.get(object_id, 0.0) + weight
+        top = heapq.nsmallest(
+            limit,
+            generation.matching(scores, filters),
+            key=lambda object_id: (-scores[object_id], object_id),
+        )
+        ordered = [(object_id, scores[object_id]) for object_id in top]
+        details = {
+            object_id: [detail for posting, _weight, detail in matched if object_id in posting]
+            for object_id in top
+        }
         return [
             RetrievalHit(
                 object_ref=ObjectRef(

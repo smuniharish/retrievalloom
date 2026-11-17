@@ -1,7 +1,8 @@
 # Metadata store
 
-The metadata store is the source of truth. Indexes are derived from it and can
-be rebuilt from it at any time.
+The metadata store holds every document, version and indexing record, and each
+index can be rebuilt from it at any time. This page describes its contract, its
+SQLite and PostgreSQL implementations, and how they handle concurrent writers.
 
 ## Contract
 
@@ -44,9 +45,13 @@ implementation.
 | `rl_generations` | Index generations and their state. |
 | `rl_generation_pointers` | The published generation per (scope, unit, instance). |
 | `rl_coverage` | Per document and unit: target version, indexed version, state, attempts, last error. |
+| `rl_coverage_watermarks` | Per unit: the highest document `change_seq` that has coverage rows. The indexer reads only documents changed after it. |
+| `rl_keyword_dictionaries` | Metadata keyword dictionaries per scope: metadata fields and a revision that changes when a term appears or disappears. |
+| `rl_keyword_terms` | Terms of each keyword dictionary with the number of active documents using them. |
 | `rl_tasks` | Backfill and rebuild tasks. |
 | `rl_reader_leases` | Durable reader leases per generation and engine instance. |
 | `rl_engine_instances` | Registered engine instances and their heartbeats. |
+| `rl_purge_log` | One entry per purged document: per-scope sequence, document uid, erased object ids, time. Engines follow it to evict purged objects from their in-memory indexes. |
 | `rl_refresh_state` | refresh-engine resource state. |
 
 Rows of ephemeral units carry the engine instance id. Durable units use the

@@ -1,6 +1,7 @@
 # Contributing
 
-Contributions are welcome. The full guide, including how to propose changes and
+Set up a development environment and make your first change. Contributions are
+welcome. The full guide, including how to propose changes and
 what a pull request needs, is
 [CONTRIBUTING.md](https://github.com/smuniharish/retrievalloom/blob/main/CONTRIBUTING.md)
 in the repository.

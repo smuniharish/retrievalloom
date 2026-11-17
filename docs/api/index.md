@@ -15,7 +15,7 @@ shows the module where the object is defined.
 | [Records and reports](records.md) | `IngestReport`, `DeleteReport`, `PurgeReport`, `ScopeStatus`, `HealthReport`, lifecycle enumerations |
 | [Contracts](contracts.md) | The component abstract base classes, from `EmbeddingModelABC` to `ProvenanceRecorderABC` |
 | [Built-in components](components.md) | Default tokenizer, index backends, Qdrant, LadybugDB, TreeSearch, fusion, FlashRank, caches |
-| [Storage](storage.md) | `SQLiteMetadataStore` and the metadata store contracts |
+| [Storage](storage.md) | `SQLiteMetadataStore`, `PostgresMetadataStore` and the metadata store contracts |
 | [Integrations](integrations.md) | `AgxaiProvenanceRecorder` |
 | [Errors](errors.md) | `RetrievalLoomError` and its subclasses |
 | [Testing](testing.md) | The pytest contract kits for custom components |

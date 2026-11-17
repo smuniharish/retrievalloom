@@ -47,7 +47,7 @@ dependencies = [
   "aiosqlite>=0.22.1,<1",
   "alembic>=1.20.1,<2",
   "bm25s>=0.3.16,<0.4",
-  "cachetools>=6,<8",
+  "cachetools>=6,<9",
   "flashrank>=0.2.10,<0.3",
   "numpy>=2.2",
   "pydantic>=2.14.3,<3",
@@ -175,6 +175,9 @@ convention = "google"
 [tool.ruff.lint.per-file-ignores]
 "examples/**/*.py" = ["ARG", "D", "T201"]
 "scripts/**/*.py" = ["ARG", "D", "T201"]
+"retrievalloom-skills/**/scripts/*.py" = ["ARG", "D", "T201"]
+"retrievalloom-skills/**/assets/*.py" = ["ARG", "D"]
+"retrievalloom-skills/**/evals/files/**/*.py" = ["ARG", "D", "T201"]
 "tests/**/*.py" = ["A002", "ARG", "D", "S101", "S105", "S106", "S108", "S311"]
 "src/retrievalloom/storage/migrations/**/*.py" = ["D", "ERA", "E501"]
 
@@ -182,8 +185,15 @@ convention = "google"
 docstring-code-format = true
 
 [tool.pyrefly]
-project-includes = ["src", "tests", "examples", "scripts"]
-search-path = ["src", ".", "examples"]
+project-includes = ["src", "tests", "examples", "scripts", "retrievalloom-skills"]
+search-path = [
+  "src",
+  ".",
+  "examples",
+  "scripts",
+  "retrievalloom-skills/skills/retrievalloom-extend/assets",
+  "retrievalloom-skills/skills/retrievalloom-extend/evals/files/inhouse_search",
+]
 # Installed only by the `examples` dependency group; CI type-checks without it.
 ignore-missing-imports = [
   "FlagEmbedding",

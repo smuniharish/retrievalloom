@@ -75,11 +75,10 @@ class TestBgeM3SparseIndex(_ModelKit, SparseIndexContract):
         return BgeM3SparseIndex(self.models / "bge-m3", url=self.url, collection_prefix=self.prefix)
 
     async def test_explains_matches_with_learned_terms(self, component: Any) -> None:
-        """Hits name the shared vocabulary terms that produced the score."""
+        """Hits name the shared vocabulary terms; the raw text is encoded, not the tokens."""
         await self.build(component, SCOPE, "gen_explain", [DOC_A, DOC_B, DOC_C])
-        hits = await component.search(
-            SCOPE, "gen_explain", SparseQuery(tokens=("python", "packaging")), 3, None
-        )
+        stemmed = SparseQuery(tokens=("pyth", "packag"), text="Python packaging?")
+        hits = await component.search(SCOPE, "gen_explain", stemmed, 3, None)
         assert hits[0].object_ref.object_id == DOC_C
         assert any("packag" in detail.term for detail in hits[0].matched)
         assert all(detail.kind == "learned_term" for hit in hits for detail in hit.matched)

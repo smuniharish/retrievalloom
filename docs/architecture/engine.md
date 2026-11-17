@@ -1,8 +1,10 @@
 # Engine and components
 
-`RetrievalEngine` (`retrievalloom.engine`) is the only entry point. It holds
-the configuration, wires components, and routes each operation to the
-ingestion service, the lifecycle coordinator or the retrieval pipeline.
+Understand what happens when you create, open and close an engine, and which
+components it creates for you. `RetrievalEngine` (`retrievalloom.engine`) is the
+only entry point. It holds the configuration, wires components, and routes each
+operation to the ingestion service, the lifecycle coordinator or the retrieval
+pipeline.
 
 ## States
 
@@ -20,7 +22,7 @@ ingestion service, the lifecycle coordinator or the retrieval pipeline.
 `initialize()` does, in order:
 
 1. Start the offloader (executor and resourcera manager, unless supplied).
-2. Resolve the metadata store, initialise it and run the migration policy
+2. Resolve the metadata store, initialize it and run the migration policy
    (`LifecycleConfig.migration`).
 3. Resolve every other component: supplied ones are used as is; missing ones
    get a default or stay disabled (see below).
@@ -74,7 +76,7 @@ Passing a `vector_store` without an `embedding` model raises
 ## Ownership
 
 - The engine closes the components and resources it created.
-- Components and resources you pass in are initialised by the engine but never
+- Components and resources you pass in are initialized by the engine but never
   closed by it. They stay yours.
 - `EngineResources` (`resource_manager`, `xai_runtime`, `executor`,
   `data_dir`, `metrics`) is never closed or deleted.

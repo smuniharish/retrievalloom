@@ -6,7 +6,7 @@ write them: with typos ("conflcted copy"), with jargon ("MFA"), in German, or as
 paraphrase that shares no words with the article ("get my money back"). No single
 retrieval method handles all of these, so the example runs them all and fuses the results.
 
-## Wiring
+## How it works
 
 | Need | Component |
 | --- | --- |
@@ -15,7 +15,7 @@ retrieval method handles all of these, so the example runs them all and fuses th
 | Term overlap | sparse method (built-in BM25) |
 | Paraphrases and cross-language | dense method: `BgeM3Embedding` on `QdrantVectorStore` (Qdrant server) |
 | Fusion | reciprocal rank fusion (the default `method_fusion`) |
-| Precision at the top | `BgeCrossEncoderReranker` (bge-reranker-v2-m3, sigmoid-normalised) |
+| Precision at the top | `BgeCrossEncoderReranker` (bge-reranker-v2-m3, sigmoid-normalized) |
 | Repeated questions | `TTLCache` caches whole retrieval results and query embeddings |
 
 Articles carry `product` and `language` metadata, and queries narrow on them with

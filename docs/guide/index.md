@@ -1,10 +1,30 @@
 # User guide
 
-The user guide explains how RetrievalLoom works and how to adapt it.
+Learn how RetrievalLoom works and how to use it in production. **Concepts**
+explain how documents are stored, indexed and searched. **How-to guides** each
+solve one task from start to finish.
 
-- [Concepts](concepts/index.md) explain scopes, documents, channels, the
-  retrieval pipeline, evidence, index generations and offloading.
-- [How-to guides](how-to/index.md) are task-focused: plug in an embedding
-  model, a reranker or your own backend, run several engines on one store,
-  filter and authorise, and keep the event loop responsive.
-- [Troubleshooting](troubleshooting.md) maps warnings and errors to causes.
+<div class="grid cards" markdown>
+
+-   :material-shape-outline:{ .lg .middle } __[Concepts](concepts/index.md)__
+
+    ---
+
+    How documents and versions are organized, which search methods exist, what
+    happens during a search, and how indexes stay current.
+
+-   :material-hammer-wrench:{ .lg .middle } __[How-to guides](how-to/index.md)__
+
+    ---
+
+    Add semantic search and reranking, keep data across restarts, run several
+    engines, restrict results by metadata and user, and connect your own
+    stores.
+
+-   :material-lifebuoy:{ .lg .middle } __[Troubleshooting](troubleshooting.md)__
+
+    ---
+
+    Find a warning or error, learn what causes it, and fix it.
+
+</div>

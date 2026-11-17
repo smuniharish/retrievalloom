@@ -272,7 +272,12 @@ async def test_tick_reports_failures_without_raising(
     fail_transaction(monkeypatch, "heartbeat_instance", lambda: RuntimeError("db gone"))
     await h.coordinator.tick()
     _, _, fields = next(r for r in h.logger.records if r[1] == "lifecycle_tick_failed")
-    assert fields == {"error_type": "RuntimeError"}
+    assert fields == {
+        "error_type": "RuntimeError",
+        "error_code": "unexpected_error",
+        "error": "RuntimeError",
+        "details": {},
+    }
 
 
 async def test_background_scheduler_runs_rounds(store: SQLiteMetadataStore) -> None:
@@ -332,3 +337,93 @@ async def test_stop_cancels_a_kicked_round(
     await started.wait()
     await h.close()
     assert "lifecycle_round_failed" not in h.logger.events("error")
+
+
+# automatic retry of failed coverage -------------------------------------------------------
+async def failed_after_outage(h: Harness, backend: DictIndex, error: Exception) -> None:
+    """Index ``a`` and ``b``, then fail their update until their coverage is ``failed``."""
+    await h.ingestion.ingest([text_doc("a", "x"), text_doc("b", "y")], SCOPE)
+    await h.coordinator.run_once()
+    backend.fail["write"] = error
+    await h.ingestion.ingest([text_doc("a", "x2"), text_doc("b", "y2")], SCOPE)
+    await run_until_failed(h)
+
+
+async def run_until_failed(h: Harness) -> None:
+    for _ in range(4):  # a round stops at its first failing batch
+        await h.coordinator.run_once()
+    assert (await coverage(h, "a")).state == CoverageState.FAILED
+    assert (await coverage(h, "b")).state == CoverageState.FAILED
+
+
+def requeued(h: Harness) -> list[int]:
+    return [f["documents"] for _, e, f in h.logger.records if e == "failed_coverage_requeued"]
+
+
+async def test_retryable_failures_are_requeued_with_exponential_backoff(
+    store: SQLiteMetadataStore,
+) -> None:
+    backend = DictIndex(durable=True)
+    h = harness(
+        store,
+        backend,
+        max_attempts=1,
+        batch_size=1,
+        retry_failed_after=10.0,
+        retry_failed_max_delay=25.0,
+    )
+    await failed_after_outage(h, backend, BackendUnavailableError("qdrant down"))
+    delays = []
+    for _ in range(3):
+        waited = 0
+        while (await coverage(h, "a")).state == CoverageState.FAILED:
+            h.clock.advance(5)
+            waited += 5
+            await h.coordinator.maintain(housekeeping=False)
+        delays.append(waited)
+        assert (await coverage(h, "b")).state == CoverageState.PENDING
+        await run_until_failed(h)  # fails again: one more attempt, a longer delay
+    assert delays == [10, 20, 25]
+    assert (await coverage(h, "a")).attempts == 4
+    assert requeued(h) == [2, 2, 2]
+    del backend.fail["write"]
+    h.clock.advance(25)
+    await h.coordinator.tick()
+    assert (await coverage(h, "a")).state == CoverageState.READY
+    assert (await coverage(h, "b")).state == CoverageState.READY
+
+
+async def test_the_retry_sweep_is_throttled(store: SQLiteMetadataStore) -> None:
+    backend = DictIndex()
+    h = harness(store, backend, max_attempts=1, retry_failed_after=10.0)
+    await failed_after_outage(h, backend, BackendUnavailableError("down"))
+    await h.coordinator.maintain(housekeeping=False)  # sweeps: not due yet
+    h.clock.advance(9.9)
+    await h.coordinator.maintain(housekeeping=False)  # sweeps: still not due
+    h.clock.advance(0.2)
+    await h.coordinator.maintain(housekeeping=False)  # due, but swept 0.2 s ago: skipped
+    assert (await coverage(h, "a")).state == CoverageState.FAILED
+    h.clock.advance(4.9)
+    await h.coordinator.maintain(housekeeping=False)
+    assert (await coverage(h, "a")).state == CoverageState.PENDING
+
+
+@pytest.mark.parametrize(
+    ("error", "config"),
+    [
+        (RuntimeError("bug"), {"retry_failed_after": 1.0}),
+        (BackendUnavailableError("down"), {"retry_failed_after": None}),
+    ],
+    ids=["non-retryable", "disabled"],
+)
+async def test_failures_stay_failed_until_a_backfill(
+    store: SQLiteMetadataStore, error: Exception, config: dict[str, object]
+) -> None:
+    backend = DictIndex()
+    h = harness(store, backend, max_attempts=1, **config)
+    await failed_after_outage(h, backend, error)
+    for _ in range(3):
+        h.clock.advance(3600)
+        await h.coordinator.maintain(housekeeping=False)
+    assert (await coverage(h, "a")).state == CoverageState.FAILED
+    assert requeued(h) == []

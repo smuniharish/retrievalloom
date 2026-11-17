@@ -14,91 +14,83 @@
   <a href="https://github.com/smuniharish/retrievalloom/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
 </p>
 
-**Multi-channel retrieval and evidence with provenance, as an async Python library.**
+**Find the right passage, whatever the user types, and prove where it came from.**
 
-RetrievalLoom indexes your documents through several retrieval methods, keeps
-those indexes in step as documents change, fuses what the methods find, and
-returns ranked evidence that names its document, version, span and the
-pipeline stages that produced it. It is an embeddable library with an
-async-only API. Bring your own embedding model, reranker, NLI model, vector
-store or metadata store through `abc.ABC` contracts, or use the defaults.
+RetrievalLoom is a hybrid retrieval library for async Python applications. One
+call searches your documents by exact keyword, by spelling-tolerant match, by
+term relevance (BM25) and by meaning, and merges the results into one ranked
+list. Every result tells you which document, which version and which passage it
+came from. It runs inside your application: there is no separate service to
+deploy.
 
 ## Why RetrievalLoom
 
-Retrieval in a real application is more than one call to a vector database:
+Picture a support assistant for a software product. In one hour it has to
+answer:
 
-- **One method is not enough.** Exact identifiers, misspellings, terms and
-  meaning need keyword, fuzzy, BM25 and dense search, and their results must be
-  merged.
-- **Indexes drift.** Documents change and models are replaced. Without
-  tracking, a search can mix old and new versions or read an index that is
-  half built.
-- **Answers need sources.** Downstream code and auditors need to know which
-  document version and span each result came from.
-- **Tenants share infrastructure.** One tenant's data must never appear in
-  another's results, and one busy tenant must not starve the rest.
-- **Models block.** Embedding, reranking and NLI are CPU-bound and stall an
-  async service if they run on the event loop.
+- "What does error `E1042` mean?" — an exact code that semantic search blurs.
+- "How do I fix a conflcted copy?" — a typo that exact search misses.
+- "How do I get my money back?" — a paraphrase of an article titled "Refunding
+  a card payment" that shares no words with it.
 
-How RetrievalLoom addresses each one:
+No single search method handles all three. Real deployments add more demands:
+articles change every day, each customer must see only their own content, and
+every answer must cite its source.
 
-| Problem | What RetrievalLoom does |
+| What you need | What RetrievalLoom gives you |
 | --- | --- |
-| One method is not enough | Keyword, fuzzy, sparse (BM25) and dense methods, plus optional graph and structure channels, fused with RRF or score-based fusion |
-| Indexes drift | Indexes are built as generations and published atomically; coverage is tracked per document version, and retrieval reads a consistent snapshot |
-| Answers need sources | Every evidence item carries provenance: sources, spans, pages, method hits and pipeline stages |
-| Tenants share infrastructure | Every call is scoped; results are validated against the scope; per-tenant concurrency limits and an access policy hook |
-| Models block | Blocking work runs in threads through an offloader with resourcera admission control and backpressure |
-
-RetrievalLoom is not a SaaS, an agent framework, a RAG framework, an embedding
-provider, a document parser or a chunker. It does not need LangChain,
-LlamaIndex or any other framework.
+| Match codes, typos and paraphrases | Keyword, fuzzy, BM25 and vector search run together, and their rankings are fused into one list. Optional graph and section-tree search join the same list. |
+| Search results that stay correct as content changes | Edits and deletions reach every index automatically. A search never mixes an old and a new version of a document, and never reads a half-built index. |
+| Answers you can cite and audit | Each result names its document and version, lists the search methods that found it, and carries the character span, pages and section path you supplied. |
+| Many customers on one deployment | Every call is scoped to a tenant and collection. A result from another tenant is an error, never a silent leak. Per-tenant limits keep one busy customer from slowing the rest. |
+| A responsive async service | Model inference and index work run in worker threads with admission control, so your event loop keeps serving requests. |
 
 ## Highlights
 
-- **Works out of the box.** `RetrievalEngine()` runs in memory with keyword,
-  fuzzy and BM25 search and no model downloads.
-- **Pre-chunked and multi-representation input.** Send plain text, your own
-  chunks with spans and pages, document structure, or a graph.
-- **Lifecycle management.** Incremental indexing, backfill when you add a
-  method, rebuild when you change a model, and safe retirement of old
-  generations while readers still use them.
-- **Optional evidence stages.** Rerank with the built-in FlashRank reranker
-  (used by default when its model is present) or your own model, check
-  support and contradiction with an NLI model, and consolidate overlapping
-  spans.
-- **Durable storage.** SQLite metadata with Alembic migrations, and Qdrant in
-  memory, on disk, on a server or in Qdrant Cloud. Several engines can share
-  one store.
-- **Integrations.** refresh-engine for background indexing, resourcera for
-  admission control, and agxai for provenance recording.
-- **Contract kits.** `retrievalloom.testing` checks your components against
-  the same pytest suites the built-in ones pass.
-- **Small and typed.** Async only, type hints throughout, structured logging
-  with structlog, and 100% branch coverage on Python 3.12 to 3.14.
+- **Useful with zero setup.** `RetrievalEngine()` runs in memory with keyword,
+  fuzzy and BM25 search. No model download, server or network access.
+- **Add what you need.** Plug in an embedding model for semantic search, a
+  reranker for precision at the top, or an NLI model that flags passages which
+  contradict a claim.
+- **Your content, your chunks.** Send plain text, your own chunks with spans and
+  pages, a section outline, or a knowledge graph.
+- **Indexes that look after themselves.** New and edited documents are indexed
+  incrementally. Adding a search method backfills existing documents, and
+  changing an embedding model rebuilds its index without interrupting searches.
+- **Durable when you need it.** Keep metadata in SQLite or PostgreSQL and
+  vectors in Qdrant (in memory, on disk, on a server or in Qdrant Cloud).
+  Several engines can share one store.
+- **Your own components.** Swap in your own embedding model, reranker, vector
+  store or metadata store by subclassing a small base class. The pytest
+  contract kits in `retrievalloom.testing` check your implementation against
+  the same tests the built-in components pass.
+- **Small and typed.** An async API with type hints throughout, structured
+  logging with structlog, and 100% branch coverage on Python 3.12 to 3.14.
 
 ## Installation
 
 ```bash
-pip install retrievalloom
+pip install retrievalloom                # core: in-memory engine, Qdrant client, FlashRank
+pip install "retrievalloom[all]"         # plus the graph and structure channels and PostgreSQL
 ```
 
-Optional extras:
+RetrievalLoom supports Python 3.12, 3.13 and 3.14. Optional extras:
 
 | Extra | Adds |
 | --- | --- |
 | `graph` | The graph channel with LadybugDB (`LadybugGraphStore`) |
 | `structure` | The structure channel with TreeSearch (`TreeSearchStructureEngine`) |
+| `postgres` | The PostgreSQL metadata store (`PostgresMetadataStore`), shared by engines on several hosts |
 | `testing` | The pytest contract kits in `retrievalloom.testing` |
-| `all` | `graph` and `structure` |
+| `all` | `graph`, `structure` and `postgres` |
 
-The library is silent by default. To see its log events, configure structlog
-or call `logging.basicConfig(level=logging.INFO)`; see
+The library prints nothing by default. To see its log events, call
+`logging.basicConfig(level=logging.INFO)` or configure structlog; see
 [Logging](https://retrievalloom.readthedocs.io/en/latest/getting-started/installation/#logging).
 
 ## Quickstart
 
-Ingest three documents into an in-memory engine and retrieve evidence:
+Index three documents in memory and search them. No model or server is needed:
 
 ```python
 import asyncio
@@ -153,16 +145,18 @@ asyncio v1 0.0164 ['index.fuzzy', 'index.sparse']
    asyncio runs coroutines on a single-threaded event loop.
 ```
 
-`ingest` waits for one indexing round, so documents are searchable when it
-returns. `result.warnings` explains anything the engine could not do, such as
-running without an embedding model or a reranker. The
-[quickstart](https://retrievalloom.readthedocs.io/en/latest/getting-started/quickstart/)
-walks through it.
+Each result names the document and version it came from, and the search
+methods that found it. Documents are searchable as soon as `ingest` returns.
+`result.warnings` tells you about anything the engine skipped, such as semantic
+search when no embedding model is configured. The
+[Quickstart](https://retrievalloom.readthedocs.io/en/latest/getting-started/quickstart/)
+walks through the program step by step.
 
 ### Your own embedding model
 
-Subclass `EmbeddingModelABC`. Run the blocking model call through the
-offloader the engine passes to `initialize`, so the event loop never blocks:
+Add semantic search with any embedding model. Subclass `EmbeddingModelABC` and
+hand the blocking model call to the worker pool the engine gives you
+(`context.offloader`), so your event loop keeps serving requests:
 
 ```python
 from collections.abc import Callable, Sequence
@@ -175,7 +169,7 @@ from retrievalloom.runtime.offloader import WorkloadKind
 
 class MyEmbedding(EmbeddingModelABC):
     def __init__(self, encode: Callable[[list[str]], list[list[float]]], dimensions: int) -> None:
-        self._encode = encode  # a blocking call, e.g. your model's encode()
+        self._encode = encode  # a blocking call, such as your model's encode()
         self._dimensions = dimensions
         self._info = make_info(
             component="embedding",
@@ -207,14 +201,16 @@ class MyEmbedding(EmbeddingModelABC):
 engine = RetrievalEngine(components=Components(embedding=MyEmbedding(model.encode, 1024)))
 ```
 
-With an embedding model, the dense method joins the index channel. Changing
-`model_identity` later triggers a rebuild of the dense index. See
+With an embedding model configured, every search also runs a vector (dense)
+search. When you later change `model_identity`, the engine builds a new vector
+index and switches to it once it is complete. Searches keep using the old index
+until then. See
 [Use your own embedding model](https://retrievalloom.readthedocs.io/en/latest/guide/how-to/embedding-model/).
 
-### Your own vector store / metadata store
+### Your own stores
 
-The default stores live in memory. Pass durable ones to keep data across
-restarts:
+By default everything lives in memory. Pass durable stores to keep your data
+across restarts:
 
 ```python
 from retrievalloom import Components, RetrievalEngine
@@ -229,38 +225,43 @@ components = Components(
 engine = RetrievalEngine(components=components)
 ```
 
-The engine initialises components you supply but does not close them. For
-another database, subclass `DocumentMetadataStoreABC` or `VectorStoreABC` and
-run `MetadataStoreContract` or `VectorStoreContract` from
-`retrievalloom.testing` against it. See
-[Durable storage](https://retrievalloom.readthedocs.io/en/latest/guide/how-to/durable-storage/)
+To run engines on several hosts, use `PostgresMetadataStore` (`postgres` extra)
+instead of a SQLite file. To use another database, subclass
+`DocumentMetadataStoreABC` or `VectorStoreABC` and check your class with
+`MetadataStoreContract` or `VectorStoreContract` from `retrievalloom.testing`.
+The engine opens the components you pass in but leaves closing them to you. See
+[Keep data on disk](https://retrievalloom.readthedocs.io/en/latest/guide/how-to/durable-storage/)
 and [Write your own backend](https://retrievalloom.readthedocs.io/en/latest/guide/how-to/custom-backends/).
 
 ## Benchmarks
 
-`scripts/benchmark.py` measures ingest throughput and retrieval latency in process.
-See [Benchmarks](https://retrievalloom.readthedocs.io/en/latest/benchmarks/)
+`scripts/benchmark.py` measures ingest throughput, search latency and
+event-loop lag with the default in-memory components. See
+[Benchmarks](https://retrievalloom.readthedocs.io/en/latest/benchmarks/)
 for the method, the results and how to reproduce them.
 
 ## Examples
 
-Complete programs in [`examples/`](https://github.com/smuniharish/retrievalloom/tree/main/examples),
-each run by the test suite. Custom components for almost every extension point are in [`examples/adapters/`](https://retrievalloom.readthedocs.io/en/latest/examples/adapters/):
+Each program in [`examples/`](https://github.com/smuniharish/retrievalloom/tree/main/examples)
+models a real deployment, and the test suite runs it and checks its output.
+[`examples/adapters/`](https://retrievalloom.readthedocs.io/en/latest/examples/adapters/)
+holds production-style custom components you can copy, from bge-m3 embeddings
+to a Neo4j graph store:
 
 | Example | Shows | Needs |
 | --- | --- | --- |
-| [`quickstart.py`](https://retrievalloom.readthedocs.io/en/latest/examples/quickstart/) | Ingest and retrieve in memory | Base install |
-| [`customer_support.py`](https://retrievalloom.readthedocs.io/en/latest/examples/customer-support/) | Help-center search: keyword, fuzzy, BM25 and bge-m3 dense fused, cross-encoder rerank, filters | Local models, Qdrant |
-| [`multi_tenant_saas.py`](https://retrievalloom.readthedocs.io/en/latest/examples/multi-tenant-saas/) | Tenant isolation, a role-based access policy, quotas and an audit log | Base install |
-| [`document_lifecycle.py`](https://retrievalloom.readthedocs.io/en/latest/examples/document-lifecycle/) | Updates, deletes, purge, backfill and rebuild on pgvector | Local models, pgvector |
-| [`knowledge_graph.py`](https://retrievalloom.readthedocs.io/en/latest/examples/knowledge-graph/) | Entity extraction, graph channel on Neo4j or LadybugDB, graph + index fusion | `graph` extra; Neo4j optional |
-| [`policy_manual.py`](https://retrievalloom.readthedocs.io/en/latest/examples/policy-manual/) | Long sectioned documents with the structure channel | `structure` extra |
-| [`fact_checking.py`](https://retrievalloom.readthedocs.io/en/latest/examples/fact-checking/) | Claim verification with NLI and contradictions | Local models |
-| [`http_service.py`](https://retrievalloom.readthedocs.io/en/latest/examples/http-service/) | A FastAPI service with a Postman collection | `examples` group |
-| [`observability_jaeger.py`](https://retrievalloom.readthedocs.io/en/latest/examples/observability-jaeger/) | OpenTelemetry traces in Jaeger and trace ids in logs | `agxai` extra; Jaeger optional |
-| [`durable_restart.py`](https://retrievalloom.readthedocs.io/en/latest/examples/durable-restart/) | Restart on SQLite metadata and Qdrant without re-ingesting | Local models, Qdrant |
-| [`prechunked_and_multi_representation.py`](https://retrievalloom.readthedocs.io/en/latest/examples/prechunked-and-multi-representation/) | Your own chunks, spans and pages | Base install |
-| [`agxai_provenance.py`](https://retrievalloom.readthedocs.io/en/latest/examples/agxai-provenance/) | Recording retrievals with agxai | Base install |
+| [`quickstart.py`](https://retrievalloom.readthedocs.io/en/latest/examples/quickstart/) | Index and search three documents in memory | Base install |
+| [`customer_support.py`](https://retrievalloom.readthedocs.io/en/latest/examples/customer-support/) | Help-center search that handles typos, jargon, German and paraphrases, with reranking and filters | Local models, Qdrant |
+| [`multi_tenant_saas.py`](https://retrievalloom.readthedocs.io/en/latest/examples/multi-tenant-saas/) | One engine for many customers: isolation, role-based access, quotas and an audit log | Base install |
+| [`document_lifecycle.py`](https://retrievalloom.readthedocs.io/en/latest/examples/document-lifecycle/) | Edit, delete and erase documents, add semantic search later, and change models | Local models, pgvector |
+| [`knowledge_graph.py`](https://retrievalloom.readthedocs.io/en/latest/examples/knowledge-graph/) | Answer relationship questions from a knowledge graph built at ingest, on Neo4j or LadybugDB | `graph` extra; Neo4j optional |
+| [`policy_manual.py`](https://retrievalloom.readthedocs.io/en/latest/examples/policy-manual/) | Search a long policy by section and cite the section path | `structure` extra |
+| [`fact_checking.py`](https://retrievalloom.readthedocs.io/en/latest/examples/fact-checking/) | Check a claim against your documents and flag contradicting passages | Local models |
+| [`http_service.py`](https://retrievalloom.readthedocs.io/en/latest/examples/http-service/) | Serve search over HTTP with FastAPI, with a Postman collection | `examples` group |
+| [`observability_jaeger.py`](https://retrievalloom.readthedocs.io/en/latest/examples/observability-jaeger/) | Trace each request in Jaeger and find its log lines by trace id | `examples` group; Jaeger optional |
+| [`durable_restart.py`](https://retrievalloom.readthedocs.io/en/latest/examples/durable-restart/) | Restart a service without re-ingesting or re-embedding | Local models, Qdrant |
+| [`prechunked_and_multi_representation.py`](https://retrievalloom.readthedocs.io/en/latest/examples/prechunked-and-multi-representation/) | Index your own chunks with spans and pages, plus a section outline | `structure` extra |
+| [`agxai_provenance.py`](https://retrievalloom.readthedocs.io/en/latest/examples/agxai-provenance/) | Record every ingestion, deletion and search in an agxai audit trail | Base install |
 
 ## Documentation
 
@@ -269,11 +270,37 @@ Full documentation: **[retrievalloom.readthedocs.io](https://retrievalloom.readt
 - [Getting started](https://retrievalloom.readthedocs.io/en/latest/getting-started/)
 - [User guide](https://retrievalloom.readthedocs.io/en/latest/guide/)
 - [Integrations](https://retrievalloom.readthedocs.io/en/latest/integrations/)
+- [Examples](https://retrievalloom.readthedocs.io/en/latest/examples/)
 - [Architecture](https://retrievalloom.readthedocs.io/en/latest/architecture/)
 - [API reference](https://retrievalloom.readthedocs.io/en/latest/api/)
 
 Changes are listed in the
 [changelog](https://github.com/smuniharish/retrievalloom/blob/main/CHANGELOG.md).
+
+## Agent skills
+
+Let your AI coding assistant build with RetrievalLoom correctly. Two
+[Agent Skills](https://retrievalloom.readthedocs.io/en/latest/agent-skills/) teach
+Claude Code, Codex, Cursor, GitHub Copilot and other compatible agents how to
+use the library: `retrievalloom` adds it to your application, and
+`retrievalloom-extend` helps you connect your own models and stores. Install
+them with the [skills CLI](https://github.com/vercel-labs/skills):
+
+```bash
+npx skills add smuniharish/retrievalloom                                # choose interactively
+npx skills add smuniharish/retrievalloom --skill retrievalloom          # only the core skill
+npx skills add smuniharish/retrievalloom --skill retrievalloom-extend   # only the extension skill
+```
+
+See [Install the skills](https://retrievalloom.readthedocs.io/en/latest/agent-skills/install/)
+for manual and per-agent installation.
+
+## Scope
+
+RetrievalLoom is a retrieval library. It does not parse files, split text into
+chunks, host models or orchestrate agents; use it alongside the tools you
+already have for those jobs. It does not depend on LangChain, LlamaIndex or any
+other framework.
 
 ## Contributing
 

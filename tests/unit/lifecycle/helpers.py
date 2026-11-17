@@ -256,6 +256,9 @@ def build(
     lifecycle = lifecycle or LifecycleConfig(background=False)
     instance = instance_id or random_id("inst")
     readers = ReaderTracker(lease_ttl=lifecycle.lease_ttl, clock=clock)
+    service = IngestionService(
+        store, ingestion or IngestionConfig(), clock=clock, logger=logger, graph=graph
+    )
     indexer = UnitIndexer(
         store,
         preparer or ItemPreparer(tokenizer=None, embedder=None, dictionary=None),
@@ -264,9 +267,7 @@ def build(
         clock=clock,
         logger=logger,
         readers=readers,
-    )
-    service = IngestionService(
-        store, ingestion or IngestionConfig(), clock=clock, logger=logger, graph=graph
+        derive_graph=None if graph is None else service.derive_graph,
     )
     eraser = DocumentEraser(store, service, indexer, units, clock=clock, logger=logger)
     coordinator = LifecycleCoordinator(

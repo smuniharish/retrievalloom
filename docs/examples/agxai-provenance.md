@@ -1,7 +1,8 @@
 # agxai provenance
 
-This example records RetrievalLoom operations in an [agxai](https://pypi.org/project/agxai/)
-run. Passing an agxai `XAIRuntime` as `EngineResources(xai_runtime=...)` makes the engine
+Build an audit trail that shows which documents each answer used. This example records
+RetrievalLoom operations in an [agxai](https://pypi.org/project/agxai/) run. Passing an
+agxai `XAIRuntime` as `EngineResources(xai_runtime=...)` makes the engine
 use the agxai provenance recorder. Operations performed while a run is active
 (`with runtime.activate_run(run):`) are recorded on that run:
 

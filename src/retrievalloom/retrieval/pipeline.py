@@ -194,6 +194,9 @@ class RetrievalPipeline:
         )
         self._candidates = CandidateBuilder(components.store)
         self._validator = EvidenceValidator()
+        # Normalisers are stateless; built once instead of per unit per request.
+        self._rank_normalizer = RankNormalizer()
+        self._normalizer = make_normalizer(components.config.method_fusion)
         parts: list[ComponentABC | None] = [
             components.method_fusion,
             components.channel_fusion,
@@ -538,7 +541,11 @@ class RetrievalPipeline:
             case IndexMethod.SPARSE.value:
                 backend = cast("SparseIndexABC", unit.backend)
                 return await backend.search(
-                    scope, generation, SparseQuery(tokens=tokens), limit, filters
+                    scope,
+                    generation,
+                    SparseQuery(tokens=tokens, text=request.query),
+                    limit,
+                    filters,
                 )
             case IndexMethod.DENSE.value:
                 backend = cast("VectorStoreABC", unit.backend)
@@ -595,8 +602,8 @@ class RetrievalPipeline:
     async def _normalize(self, hits: Sequence[RetrievalHit]) -> dict[str, float]:
         entries = _ranked(hits)
         if any(entry.score is None or not math.isfinite(entry.score) for entry in entries):
-            return dict(await RankNormalizer().normalize(entries))
-        return dict(await make_normalizer(self._c.config.method_fusion).normalize(entries))
+            return dict(await self._rank_normalizer.normalize(entries))
+        return dict(await self._normalizer.normalize(entries))
 
     # fusion ---------------------------------------------------------------------------
     async def _channel_order(

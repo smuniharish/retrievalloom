@@ -1,11 +1,14 @@
 # Generations and coverage
 
-The metadata store is the source of truth. Indexes are derived from it and can
-always be rebuilt from it. This page explains how they are kept in step.
+Edit, delete and re-index documents while your application keeps serving
+searches. RetrievalLoom stores every document in the metadata store and builds
+each search index from it, so an index can always be rebuilt. This page
+explains how indexes follow your changes, how a search avoids half-built
+indexes, and how deleted data is erased.
 
 ## Index units
 
-Each enabled method is an *index unit*, named `<channel>.<method>` (for
+Each enabled search method keeps its own index, called an *index unit*, named `<channel>.<method>` (for
 example `index.dense`). A unit has a backend and a *dependency fingerprint*:
 a digest of the backend's identity and configuration and of the components it
 depends on (tokenizer, keyword dictionary, embedding model). Changing any of
@@ -13,7 +16,9 @@ them changes the fingerprint.
 
 ## Generations
 
-A *generation* is one build of one unit for one scope. Its state moves through:
+A *generation* is one complete build of one index for one scope. Building a
+new generation next to the current one lets you change models or rebuild an
+index without interrupting searches. Its state moves through:
 
 ```text
 building -> active -> retiring -> retired
@@ -24,7 +29,7 @@ building -> active -> retiring -> retired
 Each scope and unit has a *pointer* to its active generation. A new generation
 is published by moving the pointer with a compare-and-swap in one metadata
 transaction, together with the document visibility and coverage updates.
-Readers see the old generation or the new one, never a mix.
+Searches see the old generation or the new one, never a mix.
 
 The previous generation becomes `retiring`. It is dropped once nobody reads it
 and `generation_retention` seconds have passed. See
@@ -32,13 +37,14 @@ and `generation_retention` seconds have passed. See
 
 ## Coverage
 
-Coverage is tracked per document and unit:
+Coverage records, for each document and index, whether the document's current
+version is searchable yet:
 
 | State | Meaning |
 | --- | --- |
 | `pending` | The current version still has to be indexed. |
 | `ready` | The current version is in the active generation. |
-| `failed` | Indexing failed `max_attempts` times. Reset by `backfill`. |
+| `failed` | Indexing failed `max_attempts` times. Retried automatically when the error was retryable (see [Recover from failures](#recover-from-failures)); otherwise reset by `backfill`. |
 | `deleted` | The document was deleted and removed from the index. |
 | `not_applicable` | The document has nothing for this unit, for example no `structure` representation. |
 | `processing`, `stale` | Defined in `CoverageState` and counted as not ready, but the current indexer does not set them. |
@@ -48,8 +54,8 @@ as warnings (see [Retrieval warnings](#what-retrieval-sees)).
 
 ## How changes reach the indexes
 
-Each lifecycle round compares every unit with the metadata store and does one
-of two things:
+Indexing runs in *rounds*. Each round compares every unit with the metadata
+store and does one of two things:
 
 - **Incremental update.** If the unit already has a generation with the
   current fingerprint and its backend can be changed in place, the new and
@@ -84,6 +90,24 @@ generation.
 Rounds run through [refresh-engine](../../integrations/refresh-engine.md),
 which retries failed units and limits concurrency (`max_concurrency`).
 
+## Recover from failures
+
+A backend outage does not leave documents unindexed for good. When a document
+fails to index `max_attempts` times, its coverage becomes `failed` and the
+error is stored with it. Each maintenance round (every background round, and
+every `run_lifecycle_once`) then decides what happens next:
+
+- **Retryable errors**, such as `BackendUnavailableError` or a timeout, are
+  queued again after `LifecycleConfig.retry_failed_after` seconds (30 by
+  default). Each further failure doubles the delay, up to
+  `retry_failed_max_delay` (900 seconds). After a vector-store outage, dense
+  coverage returns to `ready` on its own once the store is back.
+- **Non-retryable errors**, such as an embedding model that returns invalid
+  vectors, stay `failed`. Fix the cause, then call `backfill`, which resets
+  the coverage and its attempt counter.
+
+Set `retry_failed_after=None` to turn automatic retries off.
+
 ## Tasks
 
 `backfill` and `rebuild` queue durable lifecycle tasks and return a
@@ -104,26 +128,41 @@ See [Backfill and rebuild](../how-to/backfill-and-rebuild.md).
 
 ## Deletion, erasure and retention
 
-`delete` makes a document a *tombstone*: it is hidden from retrieval at once,
+Deleting a document hides it at once; erasing it removes every trace. `delete`
+makes a document a *tombstone*: it is hidden from retrieval at once,
 its objects and graph contributions are retracted, and the next rounds remove
 its objects from the indexes and mark its coverage `deleted`. The metadata
 store still holds its versions, representations, events and objects.
 
 `purge(ids, scope=...)` erases documents physically. It tombstones them first
-when needed, then for each document:
+when needed, then works in batches of up to 500 documents:
 
-1. removes its objects, and graph aggregates no other document supports, from
-   every building, active and retiring generation of this engine's units;
-2. queues a `rebuild` of the graph unit when the active graph generation still
-   includes the document (the task ids are in `PurgeReport.task_ids`);
-3. deletes every metadata row of the document in one transaction: the
-   document, its versions, representations, ingestion events, objects,
-   contributions, lineage edges, visibility windows and coverage.
+1. plans the whole batch in one read transaction;
+2. removes the batch's objects, and graph aggregates no other document
+   supports, from every building, active and retiring generation of this
+   engine's units, with one removal call per generation;
+3. queues a `rebuild` of the graph unit when the active graph generation still
+   includes a purged document (the task ids are in `PurgeReport.task_ids`);
+4. deletes every metadata row of the batch's documents in one transaction: the
+   documents, their versions, representations, ingestion events, objects,
+   contributions, lineage edges, visibility windows and coverage. The same
+   transaction appends one entry per document to the purge log.
 
-If a backend fails in step 1, nothing is deleted from the metadata store and
-the call raises; retry it. Purging is idempotent: unknown and already purged
-ids are reported in `not_found`. The same access policy action as `delete`
+A document changed by a concurrent write between steps 1 and 4 is left out of
+the transaction and planned again; the others are deleted. If a backend fails
+in step 2, nothing of the batch is deleted from the metadata store and the
+call raises; retry it. Purging is idempotent: unknown and already purged ids
+are reported in `not_found`. The same access policy action as `delete`
 authorizes it.
+
+Other engines on the same store read the purge log at the start of each
+lifecycle round and remove the purged objects from their in-memory indexes:
+within about `poll_interval` with the background scheduler, or at the next
+`ingest`, `delete`, `purge`, `wait_for` or `run_lifecycle_once` call with
+`background=False`. An engine that missed entries because they were pruned
+(after `purge_log_retention`, default 1 day) rebuilds its in-memory indexes
+of the scope instead. Retrieval never returns a purged document in the
+meantime, because evidence is read from the metadata store.
 
 The maintenance round also erases tombstones on its own once they are older
 than `purge_after` (default 7 days) and every unit has marked them `deleted`.
@@ -132,19 +171,25 @@ It prunes history too:
 - **Versions.** Only the newest `max_versions` (default 10) version-history
   entries of a document are kept, with their representations. A version is
   never pruned while it is the current version, has live objects or supports
-  a live graph aggregate, is visible to a unit, or is indexed by an active or
-  retiring generation.
+  a live graph aggregate, is visible to a unit, is indexed by an active or
+  retiring generation, or is the `version_after` of a retained ingestion
+  event. Events are pruned first, so an expired event releases its version in
+  the same round.
 - **Events.** Committed and failed ingestion events older than
   `event_retention` (default 90 days) are deleted. A redelivery of an event
   older than that is processed again instead of being reported as `replayed`.
+- **Purge log.** Entries older than `purge_log_retention` (default 1 day) are
+  deleted; the newest entry of each scope is always kept.
 
-Set any of the three to `None` to disable it. With the background scheduler,
+Set any of the first three to `None` to disable it. With the background scheduler,
 this housekeeping runs at most every five minutes; `run_lifecycle_once` always
 runs it.
 
 ## Ephemeral and durable backends
 
-A backend is *durable* when its data outlives the engine process:
+A backend is *durable* when its data outlives the engine process. Durable
+backends survive a restart; ephemeral (in-memory) ones are rebuilt from the
+metadata store:
 
 | Backend | Durable when |
 | --- | --- |
@@ -167,7 +212,8 @@ store and the same backend location.
 
 ## Reader leases
 
-Retirement must never drop a generation that a request is reading.
+A search never loses its index halfway through: retirement never drops a
+generation that a request is reading.
 
 - **In-process readers.** Every retrieval registers as a reader of each
   generation it uses until the request ends. A retiring generation accepts no
@@ -201,3 +247,9 @@ All four have `warning` severity, so the result is `partial`.
 `RetrievalConfig.missing_index_policy` controls missing indexes: `skip`
 (default), `fail` (raise `CoverageError`) or `schedule_backfill` (queue a
 backfill task and add a `backfill_scheduled` info warning).
+
+## Next steps
+
+- Keep indexes across restarts with [durable storage](../how-to/durable-storage.md).
+- Add a method or change a model with [Backfill and rebuild](../how-to/backfill-and-rebuild.md).
+- See how blocking work is scheduled in [Offloading and admission](offloading.md).

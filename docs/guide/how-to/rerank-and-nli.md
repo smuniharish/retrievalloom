@@ -1,7 +1,11 @@
 # Rerank and verify with NLI
 
-Reranking and NLI run after channel fusion, on the fused candidate list. Both
-are optional components.
+Put the best passage first, and flag passages that contradict each other. A
+**reranker** reads the query and each top passage together and reorders them,
+which usually improves the first few results. A **natural language inference
+(NLI)** model checks whether each passage supports or contradicts the query and
+any claims you pass, so you can warn users about conflicting sources. Both run
+after the search methods have been merged, and both are optional.
 
 | Stage | Component | Enabled by default | Applies to |
 | --- | --- | --- | --- |
@@ -12,14 +16,15 @@ Reranking only reorders the fused list. Fusion (RRF by default) needs no model,
 so retrieval works with or without a reranker; without one the final score is
 the channel-fusion score.
 
-When a stage is enabled but no component is available, the stage is skipped.
+A missing model never breaks a search: when a stage is enabled but no component
+is available, the stage is skipped.
 Configured reranking without a reranker is skipped silently; a request that
 asks for it explicitly with `RetrievalExecutionConfig(reranking=True)` gets a
 `reranker_unavailable` warning. NLI adds a `stage_skipped` warning, with
 severity `info` when it was enabled by configuration and `warning` when the
 request asked for it.
 
-## FlashRank (default)
+## Use the built-in FlashRank reranker
 
 `FlashRankReranker` is the built-in reranker. It runs a FlashRank pairwise
 cross-encoder on ONNX Runtime through the offloader (`WorkloadKind.RERANK`).
@@ -69,7 +74,9 @@ FlashRank's bundled models are CC-BY-SA licensed.
 
 ### Provision the model files
 
-A reranker you supply yourself is kept even when its model is missing:
+The model is never downloaded for you, so a deployment never reaches out to the
+internet unexpectedly. Place the files before you deploy. Note that a reranker
+you supply yourself is kept even when its model is missing:
 `initialize` logs `reranker_unavailable`, `health()` reports it unhealthy, and
 every request degrades with a `reranker_unavailable` warning.
 
@@ -90,7 +97,7 @@ FlashRank reads all five files when it loads the model.
 Two ways to provision it:
 
 - **Download once.** On a machine with network access, construct the reranker
-  with `allow_download=True` and the same `cache_dir`, initialise an engine
+  with `allow_download=True` and the same `cache_dir`, initialize an engine
   once, then copy the directory to the target environment.
 - **Manual.** Download
   `https://huggingface.co/prithivida/flashrank/resolve/main/<model_name>.zip`
@@ -104,9 +111,9 @@ reranker = FlashRankReranker("models/flashrank")
 assert reranker.model_path.is_file(), reranker.model_path
 ```
 
-## Your own reranker
+## Use your own reranker
 
-Subclass `RerankerABC`. `rerank(query, items)` must return one `RerankScore`
+To use a different model or a hosted reranking API, subclass `RerankerABC`. `rerank(query, items)` must return one `RerankScore`
 per `RerankItem`, matched by `item_id`, each score finite. Run the model
 through the offloader:
 
@@ -149,7 +156,7 @@ class OverlapReranker(RerankerABC):
 After reranking, `Evidence.scores.rerank` holds the score of the best member.
 Candidates beyond `rerank_k` keep their fusion order below the reranked ones.
 
-## NLI
+## Check claims with NLI
 
 An NLI model judges each candidate text (premise) against the query and every
 claim passed to `retrieve(..., claims=[...])` (hypotheses). Up to 32 claims are
@@ -254,12 +261,12 @@ Both items report `has_contradiction` as true: `a` entails the hypotheses and `b
 contradicts them, so the two are linked.
 
 Each evidence item carries an `nli_summary` with the label counts of its
-members' judgements. `has_contradiction` is true when a member takes part in a
+members' judgments. `has_contradiction` is true when a member takes part in a
 `contradicts` relation: one candidate is judged entailment and another
 contradiction for the same hypothesis. Consolidation keeps linked items in the
 result even past `top_k` (see [Evidence](../concepts/evidence.md)).
 
-## Failure policy
+## Choose what happens on failure
 
 `RerankingConfig.on_error` and `NLIConfig.on_error` accept `"degrade"`
 (default) or `"fail"`. With `degrade`, an error or a deadline in the stage adds
@@ -267,5 +274,8 @@ a warning and the request continues without that stage. A reranker that raises
 `BackendUnavailableError` produces `reranker_unavailable`; other errors produce
 `stage_failed_degraded`. With `fail`, the error propagates.
 
-The [fact checking example](../../examples/fact-checking.md)
-runs real cross-encoder and NLI models from a local directory.
+## Next steps
+
+- Run real cross-encoder and NLI models from a local directory in the
+  [fact checking example](../../examples/fact-checking.md).
+- Read NLI judgments on each result in [Evidence and provenance](../concepts/evidence.md).

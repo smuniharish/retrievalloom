@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import itertools
 import math
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -42,7 +43,7 @@ from retrievalloom.errors import (
 from retrievalloom.runtime.offloader import WorkloadKind
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
 
     from retrievalloom.contracts.component import ComponentContext
     from retrievalloom.contracts.indexes import GenerationSpec, IndexItem
@@ -405,9 +406,9 @@ class QdrantVectorStore(VectorStoreABC):
         if name is None:
             name = await self._ensure_collection(scope.tenant_id, dimensions)
             self._collections[(scope.key, generation_id)] = name
-        for batch in _batches(points, self.capabilities.max_batch):
+        for batch in itertools.batched(points, self.capabilities.max_batch):
             await self._call(
-                scope.tenant_id, "upsert", collection_name=name, points=batch, wait=True
+                scope.tenant_id, "upsert", collection_name=name, points=list(batch), wait=True
             )
         return WriteReport(written=len(points))
 
@@ -424,8 +425,8 @@ class QdrantVectorStore(VectorStoreABC):
             return 0
         removed = 0
         ids = [point_id(scope.key, generation_id, object_id) for object_id in object_ids]
-        for batch in _batches(ids, self.capabilities.max_batch):
-            present = await self._present(scope, name, batch)
+        for batch in itertools.batched(ids, self.capabilities.max_batch):
+            present = await self._present(scope, name, list(batch))
             if present:
                 await self._call(
                     scope.tenant_id,
@@ -562,8 +563,3 @@ class QdrantVectorStore(VectorStoreABC):
             if len(hits) == limit:
                 break
         return hits
-
-
-def _batches[T](values: list[T], size: int) -> Iterator[list[T]]:
-    for start in range(0, len(values), size):
-        yield values[start : start + size]

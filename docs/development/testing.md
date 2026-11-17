@@ -1,7 +1,8 @@
 # Testing
 
-The default test run needs no services, no network and no model weights. Live
-suites run against real backends when you point them at one.
+Run the test suite before you open a pull request. The default run needs no
+services, no network and no model weights. Live suites run against real
+backends when you point them at one.
 
 ## Everyday commands
 
@@ -70,6 +71,9 @@ In PowerShell, set the variables with `$env:RL_TEST_QDRANT_URL = "http://localho
 Every test uses a unique collection prefix and drops its collections
 afterwards, so a shared server is safe. Continuous integration runs
 `pytest -m "live and not models"` against a Qdrant service container.
+
+The soak, fault-injection and multi-process suites have their own switches; see
+[Reliability suites](reliability.md).
 
 ### Models
 

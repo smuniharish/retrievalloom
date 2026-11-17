@@ -63,6 +63,9 @@ scopes = sa.Table(
     sa.Column("tenant_id", sa.String(256), nullable=False),
     sa.Column("namespace", sa.String(256), nullable=False),
     sa.Column("collection", sa.String(256), nullable=False),
+    # Replaced by every committed write to the scope's documents, coverage, generations
+    # or pointers: equal tokens mean equal snapshot inputs (see ``snapshot_marker``).
+    sa.Column("snapshot_token", sa.String(64), nullable=True),
 )
 
 documents = sa.Table(
@@ -180,7 +183,14 @@ sa.Index(
     objects.c.document_uid,
     objects.c.version,
 )
-sa.Index("ix_rl_objects_scope_kind", objects.c.scope_key, objects.c.kind, objects.c.state)
+# Ordered by object_id so full-build pages (``list_current_objects``) seek, not sort.
+sa.Index(
+    "ix_rl_objects_scope_kind_id",
+    objects.c.scope_key,
+    objects.c.kind,
+    objects.c.state,
+    objects.c.object_id,
+)
 
 object_contributions = sa.Table(
     "rl_object_contributions",
@@ -310,6 +320,35 @@ sa.Index(
     coverage.c.state,
 )
 
+coverage_watermarks = sa.Table(
+    "rl_coverage_watermarks",
+    metadata,
+    sa.Column("scope_key", sa.String(64), primary_key=True),
+    sa.Column("channel", sa.String(16), primary_key=True),
+    sa.Column("method", sa.String(64), primary_key=True),
+    sa.Column("instance", sa.String(64), primary_key=True),
+    sa.Column("change_seq", sa.Integer, nullable=False),
+)
+
+keyword_dictionaries = sa.Table(
+    "rl_keyword_dictionaries",
+    metadata,
+    sa.Column("scope_key", sa.String(64), primary_key=True),
+    sa.Column("dictionary_id", sa.String(80), primary_key=True),
+    sa.Column("fields", sa.JSON, nullable=False),
+    sa.Column("revision", sa.Integer, nullable=False),
+)
+
+keyword_terms = sa.Table(
+    "rl_keyword_terms",
+    metadata,
+    sa.Column("scope_key", sa.String(64), primary_key=True),
+    sa.Column("dictionary_id", sa.String(80), primary_key=True),
+    sa.Column("term_hash", sa.String(80), primary_key=True),
+    sa.Column("term", sa.Text, nullable=False),
+    sa.Column("documents", sa.Integer, nullable=False),
+)
+
 tasks = sa.Table(
     "rl_tasks",
     metadata,
@@ -338,6 +377,16 @@ engine_instances = sa.Table(
     sa.Column("engine_id", sa.String(64), nullable=False),
     sa.Column("started_at", UTCDateTime, nullable=False),
     sa.Column("expires_at", UTCDateTime, nullable=False),
+)
+
+purge_log = sa.Table(
+    "rl_purge_log",
+    metadata,
+    sa.Column("scope_key", sa.String(64), primary_key=True),
+    sa.Column("seq", sa.Integer, primary_key=True, autoincrement=False),
+    sa.Column("document_uid", sa.String(64), nullable=False),
+    sa.Column("object_ids", sa.JSON, nullable=False),
+    sa.Column("purged_at", UTCDateTime, nullable=False),
 )
 
 refresh_state = sa.Table(

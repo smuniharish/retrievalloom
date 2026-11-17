@@ -669,8 +669,20 @@ class RetrievalEngine:
             graph=(graph_store, []),
             structure=(structure_engine, []),
         )
+        if not units:
+            raise ConfigurationError(
+                "no retrieval method has a backend; enable a channel or supply its component",
+                details={"hint": "dense needs an embedding model"},
+            )
         readers = ReaderTracker(lease_ttl=config.lifecycle.lease_ttl)
         lifecycle = config.lifecycle
+        ingestion = IngestionService(
+            store,
+            config.ingestion,
+            clock=utc_now,
+            logger=self._logger,
+            graph=None if normalizer is None else GraphDerivation(normalizer, extractor),
+        )
         indexer = UnitIndexer(
             store,
             ItemPreparer(tokenizer=tokenizer, embedder=embedder, dictionary=dictionary),
@@ -679,13 +691,7 @@ class RetrievalEngine:
             clock=utc_now,
             logger=self._logger,
             readers=readers,
-        )
-        ingestion = IngestionService(
-            store,
-            config.ingestion,
-            clock=utc_now,
-            logger=self._logger,
-            graph=None if normalizer is None else GraphDerivation(normalizer, extractor),
+            derive_graph=None if normalizer is None else ingestion.derive_graph,
         )
         eraser = DocumentEraser(
             store, ingestion, indexer, list(units.values()), clock=utc_now, logger=self._logger

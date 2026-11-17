@@ -91,7 +91,13 @@ CROSS_SCOPE: dict[str, Call] = {
     "upsert_coverage": lambda tx: tx.upsert_coverage([coverage(OTHER, "doc-1")]),
     "get_coverage": lambda tx: tx.get_coverage(FOREIGN_UNIT, [FOREIGN_UID]),
     "list_coverage": lambda tx: tx.list_coverage(FOREIGN_UNIT, [CoverageState.PENDING]),
-    "documents_missing_coverage": lambda tx: tx.documents_missing_coverage(FOREIGN_UNIT),
+    "get_coverage_watermark": lambda tx: tx.get_coverage_watermark(FOREIGN_UNIT),
+    "set_coverage_watermark": lambda tx: tx.set_coverage_watermark(FOREIGN_UNIT, 1),
+    "list_changed_documents": lambda tx: tx.list_changed_documents(OTHER.key, after_seq=0),
+    "list_keyword_dictionaries": lambda tx: tx.list_keyword_dictionaries(OTHER.key),
+    "create_keyword_dictionary": lambda tx: tx.create_keyword_dictionary(OTHER.key, "d", [], {}),
+    "adjust_keyword_terms": lambda tx: tx.adjust_keyword_terms(OTHER.key, "d", {"t": 1}),
+    "list_keyword_terms": lambda tx: tx.list_keyword_terms(OTHER.key, "d"),
     "coverage_counts": lambda tx: tx.coverage_counts(OTHER.key, [""]),
     "set_document_coverage_state": lambda tx: tx.set_document_coverage_state(
         OTHER.key, FOREIGN_UID, CoverageState.STALE, target_version=1
@@ -106,6 +112,9 @@ CROSS_SCOPE: dict[str, Call] = {
     "list_pointers": lambda tx: tx.list_pointers(OTHER.key, [""]),
     "put_task": lambda tx: tx.put_task(task(OTHER), expected_revision=None),
     "list_tasks": lambda tx: tx.list_tasks(scope_key=OTHER.key),
+    "purge_documents": lambda tx: tx.purge_documents(OTHER.key, {}, purged_at=NOW),
+    "list_purge_log": lambda tx: tx.list_purge_log(OTHER.key, after_seq=0),
+    "prune_purge_log": lambda tx: tx.prune_purge_log(OTHER.key, before=NOW),
 }
 
 
@@ -197,6 +206,8 @@ WRITES: dict[str, Call] = {
         "i", "e", started_at=NOW, expires_at=NOW
     ),
     "purge_instance": lambda tx: tx.purge_instance("i"),
+    "purge_documents": lambda tx: tx.purge_documents(SCOPE.key, {}, purged_at=NOW),
+    "prune_purge_log": lambda tx: tx.prune_purge_log(SCOPE.key, before=NOW),
     "apply_refresh_states": lambda tx: tx.apply_refresh_states(
         "ns", [StoredRefreshState(resource_id="r", state={})], []
     ),

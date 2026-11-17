@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from cachetools import LRUCache
+
 from retrievalloom.domain.records import CoverageState, DocumentState, MissingIndexPolicy
 from retrievalloom.domain.retrieval import (
     CoverageSummary,
@@ -23,10 +25,12 @@ if TYPE_CHECKING:
     from retrievalloom.lifecycle.indexer import ReaderTracker
     from retrievalloom.lifecycle.units import IndexUnit
     from retrievalloom.retrieval.planning import ExecutionPlan, PlannedMethod
-    from retrievalloom.storage.base import DocumentMetadataStoreABC
+    from retrievalloom.storage.base import DocumentMetadataStoreABC, UnitKey
 
     BackfillScheduler = Callable[[Scope, Sequence[IndexUnit]], Awaitable[str | None]]
 
+# Scopes whose last snapshot reads are kept for reuse.
+_MEMO_SCOPES = 256
 _NOT_READY = (
     CoverageState.PENDING,
     CoverageState.PROCESSING,
@@ -65,6 +69,20 @@ class Snapshot:
         )
 
 
+@dataclass(slots=True)
+class _Reads:
+    """Snapshot inputs read under one snapshot token (``None``: not reusable)."""
+
+    token: str | None
+    documents: dict[str, int]
+    counts: dict[str, dict[str, int]]
+    generations: dict[UnitKey, IndexGeneration | None] = field(default_factory=dict)
+
+    def copy(self) -> _Reads:
+        """A copy whose generation map can be extended independently."""
+        return _Reads(self.token, self.documents, self.counts, dict(self.generations))
+
+
 def _warning(
     code: WarningCode, message: str, method: PlannedMethod, severity: Severity, **details: Any
 ) -> RetrievalWarning:
@@ -94,6 +112,45 @@ class SnapshotReader:
         self._readers = readers
         self._instance_id = instance_id
         self._schedule_backfill = schedule_backfill
+        self._memo: LRUCache[str, _Reads] = LRUCache(maxsize=_MEMO_SCOPES)
+
+    async def _read(self, scope: Scope, plan: ExecutionPlan) -> tuple[int, _Reads]:
+        """Commit sequence and snapshot inputs, reusing reads of an unchanged scope.
+
+        Reads under one snapshot token see equal document counts, coverage counts,
+        pointers and generations (see ``snapshot_marker``), so an entry read under the
+        token observed in this transaction is reused and only pointers of units it lacks
+        are read.
+        """
+        async with self._store.transaction(scope, write=False) as transaction:
+            seq, token = await transaction.snapshot_marker(scope.key)
+            reads = self._memo.get(scope.key) if token is not None else None
+            if reads is None or reads.token != token:
+                reads = _Reads(
+                    token=token,
+                    documents=dict(await transaction.count_documents(scope.key)),
+                    counts={
+                        key: dict(value)
+                        for key, value in (
+                            await transaction.coverage_counts(scope.key, ["", self._instance_id])
+                        ).items()
+                    },
+                )
+            else:
+                reads = reads.copy()
+            for method in plan.methods:
+                key = method.unit.key(scope)
+                if key in reads.generations:
+                    continue
+                pointer = await transaction.get_pointer(key)
+                reads.generations[key] = (
+                    None
+                    if pointer is None
+                    else await transaction.get_generation(pointer.generation_id)
+                )
+        if token is not None:
+            self._memo[scope.key] = reads
+        return seq, reads
 
     async def capture(self, scope: Scope, plan: ExecutionPlan) -> Snapshot:
         """Capture the snapshot of ``plan`` and acquire its generations.
@@ -104,19 +161,12 @@ class SnapshotReader:
         Raises:
             CoverageError: A method has no index and the policy is ``fail``.
         """
-        generations: dict[str, IndexGeneration | None] = {}
-        async with self._store.transaction(scope, write=False) as transaction:
-            seq = await transaction.current_commit_seq()
-            documents = await transaction.count_documents(scope.key)
-            counts = await transaction.coverage_counts(scope.key, ["", self._instance_id])
-            for method in plan.methods:
-                pointer = await transaction.get_pointer(method.unit.key(scope))
-                generations[method.name] = (
-                    None
-                    if pointer is None
-                    else await transaction.get_generation(pointer.generation_id)
-                )
-        active = int(documents.get(DocumentState.ACTIVE.value, 0))
+        seq, reads = await self._read(scope, plan)
+        generations: dict[str, IndexGeneration | None] = {
+            method.name: reads.generations[method.unit.key(scope)] for method in plan.methods
+        }
+        counts = reads.counts
+        active = int(reads.documents.get(DocumentState.ACTIVE.value, 0))
         snapshot = Snapshot(
             seq=seq,
             active_documents=active,

@@ -1,7 +1,7 @@
 # Testing
 
 Reusable pytest contract kits for your own adapters. They need the `testing`
-extra. See [Write a custom backend](../guide/how-to/custom-backends.md#check-it-with-a-contract-kit).
+extra. See [Write your own backend](../guide/how-to/custom-backends.md#check-it-with-a-contract-kit).
 
 ## Base
 

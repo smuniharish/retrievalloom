@@ -154,6 +154,29 @@ async def test_fuzzy_vocabulary_follows_posting_changes(context: ComponentContex
     await assert_equals_rebuild(index, queries, "gen", {"a": "rust", "c": "python"})
 
 
+async def test_fuzzy_matches_are_not_cached_across_a_vocabulary_change(
+    context: ComponentContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index = await ready(RapidFuzzIndex(max_ngram=1, score_cutoff=80), context)
+    await index.create_generation(SCOPE, spec("gen"))
+    await index.write(SCOPE, "gen", [obj("a", "python")])
+    await index.seal(SCOPE, "gen")
+    run = index.offloader.run
+
+    async def write_while_matching(*args: Any, **kwargs: Any) -> Any:
+        monkeypatch.setattr(index.offloader, "run", run)
+        found = await run(*args, **kwargs)
+        # A concurrent search refreshes the vocabulary before this match returns.
+        await index.write(SCOPE, "gen", [obj("b", "pythons")])
+        await index.search(SCOPE, "gen", FuzzyQuery(tokens=("tokio",)), 10, None)
+        return found
+
+    monkeypatch.setattr(index.offloader, "run", write_while_matching)
+    query = FuzzyQuery(tokens=("pythons",))
+    assert names(await index.search(SCOPE, "gen", query, 10, None)) == ["a"]
+    assert sorted(names(await index.search(SCOPE, "gen", query, 10, None))) == ["a", "b"]
+
+
 async def test_keyword_postings_follow_replacements(context: ComponentContext) -> None:
     index = await ready(AhoCorasickKeywordIndex(), context)
     await index.create_generation(SCOPE, spec("gen", *ENTRIES))

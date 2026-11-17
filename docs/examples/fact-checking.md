@@ -5,20 +5,20 @@ files" may appear in an old forum post while the current article says the opposi
 Retrieval alone would return both passages. NLI tells the bot which passages support the
 claim and which contradict it.
 
-## Wiring
+## How it works
 
 - **Candidates.** `retrieve(query, claims=[claim])` retrieves candidates for the claim.
-  `BgeCrossEncoderReranker` (normalised to 0..1) scores their relevance.
+  `BgeCrossEncoderReranker` (normalized to 0..1) scores their relevance.
 - **NLI.** `UltraBertNLI` (a custom `NLIABC` over `models/UltraBERT-150M-nli`) judges the
-  `nli_k=4` best candidates against the claim. Each judgement has
+  `nli_k=4` best candidates against the claim. Each judgment has
   `hypothesis_ref="claim:0"`, a label (entailment, neutral or contradiction) and a
   confidence.
 - **Contradiction-closed selection.** When one candidate entails the claim and another
   contradicts it, the engine records a contradiction between them. The evidence is
   contradiction-closed: an item that contradicts a selected item is returned even beyond
   `top_k`, and `nli_summary.has_contradiction` is set on both.
-- **Verdicts.** The application turns the judgements into *supported*, *refuted*,
-  *disputed* or *not enough evidence*. It counts only judgements that are confident
+- **Verdicts.** The application turns the judgments into *supported*, *refuted*,
+  *disputed* or *not enough evidence*. It counts only judgments that are confident
   (≥ 0.6) and on relevant passages (rerank ≥ 0.05).
 
 The relevance threshold matters. NLI labels every pair it sees, including unrelated
@@ -90,4 +90,4 @@ Things to notice:
 - In the third claim the irrelevant contradicting passage is pulled into the evidence
   (3 items for `top_k=2`). That is contradiction closure at work.
 - In the fourth claim nothing entails the claim, so no contradiction is recorded between
-  passages. The refutation comes from the per-candidate judgements.
+  passages. The refutation comes from the per-candidate judgments.

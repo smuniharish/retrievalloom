@@ -15,13 +15,15 @@ from retrievalloom.contracts.indexes import (
     IndexItem,
     WriteReport,
 )
+from retrievalloom.domain.filters import evaluate
 from retrievalloom.errors import GenerationError, LifecycleError
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     from retrievalloom.contracts.component import ComponentContext
     from retrievalloom.domain.base import Metadata
+    from retrievalloom.domain.filters import FilterExpression
     from retrievalloom.domain.inputs import Scope
     from retrievalloom.runtime.offloader import Offloader, WorkloadKind
 
@@ -36,6 +38,22 @@ class MemoryGeneration:
     sealed: bool = False
     built: Any = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    def admits(self, object_id: str, filters: FilterExpression | None) -> bool:
+        """Whether ``object_id`` is present and its metadata matches ``filters``."""
+        metadata = self.metadata.get(object_id)
+        return metadata is not None and (filters is None or evaluate(filters, metadata))
+
+    def matching(self, object_ids: Iterable[str], filters: FilterExpression | None) -> list[str]:
+        """The ids of ``object_ids`` that :meth:`admits`, in order."""
+        metadata = self.metadata
+        if filters is None:
+            return [object_id for object_id in object_ids if object_id in metadata]
+        return [
+            object_id
+            for object_id in object_ids
+            if (found := metadata.get(object_id)) is not None and evaluate(filters, found)
+        ]
 
 
 class InMemoryGenerationalIndex(GenerationalIndexABC):

@@ -34,7 +34,7 @@ the others you construct and pass in `Components`.
 
 ::: retrievalloom.structure.treesearch_engine.TreeSearchStructureEngine
 
-## Fusion and normalisation
+## Fusion and normalization
 
 ::: retrievalloom.evidence.fusion.RRFFusion
 

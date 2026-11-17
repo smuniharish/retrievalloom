@@ -1,8 +1,16 @@
 # Retrieval pipeline
 
+Know what happens between a query and its results, so you can tune ranking and
+read every warning with confidence. A search runs all enabled methods at the
+same time, merges their rankings, optionally reranks the best matches, and
+groups them into evidence items. When a method fails or runs out of time, the
+search still returns what it found and tells you what was skipped.
+
+## Stages
+
 `engine.retrieve(query, scope=...)` runs these stages in order:
 
-1. **Authorise.** The access policy authorises the call and may add a
+1. **Authorize.** The access policy authorizes the call and may add a
    mandatory row filter.
 2. **Plan.** The request is validated: query length (`max_query_chars`),
    `top_k` against the tenant's `max_top_k`, filter size (`max_filter_nodes`)
@@ -34,8 +42,9 @@ retired while the request runs.
 
 ## Fusion
 
-Fusion uses [ranknexus](https://pypi.org/project/ranknexus/). Two levels are
-configured separately:
+Fusion merges several ranked lists into one. RetrievalLoom uses
+[ranknexus](https://pypi.org/project/ranknexus/) at two levels, configured
+separately:
 
 - `RetrievalConfig.method_fusion` fuses the methods inside the index channel,
   weighted by `MethodConfig.weight`.
@@ -44,8 +53,8 @@ configured separately:
 
 Both default to Reciprocal Rank Fusion with `k=60`. The supported methods are
 `rrf`, `weighted_rrf`, `weighted_score`, `combsum` and `combmnz`. Score-based
-methods normalise scores first with `minmax`, `zscore`, `rank` or `sigmoid`.
-Hits without a finite score fall back to rank normalisation. You can change the
+methods normalize scores first with `minmax`, `zscore`, `rank` or `sigmoid`.
+Hits without a finite score fall back to rank normalization. You can change the
 fusion method per request:
 
 ```python
@@ -57,7 +66,9 @@ or `Components.channel_fusion`.
 
 ## Reranking and NLI
 
-Reranking is enabled by default (`RerankingConfig.enabled=True`) and uses the
+A reranker reads the query and each top passage together and reorders them,
+which usually improves the first few results. Reranking is enabled by default
+(`RerankingConfig.enabled=True`) and uses the
 built-in FlashRank reranker when its model files are in
 `RerankingConfig.model_dir`; pass `Components(reranker=...)` to use your own.
 Models are never downloaded implicitly. Without a model the default reranker is
@@ -66,16 +77,19 @@ explicitly asks for it with `RetrievalExecutionConfig(reranking=True)` gets a
 `reranker_unavailable` warning. Fusion (RRF by default) needs no model, and
 without reranking the final score is the channel-fusion score.
 
-NLI is disabled by default. When enabled and a model is configured, each of the
+Natural language inference (NLI) checks whether a passage supports or
+contradicts a statement. It is disabled by default. When enabled and a model is
+configured, each of the
 top `nli_k` candidates is judged against the query and against every claim
-passed with `retrieve(..., claims=[...])`. Judgements are stored on candidates
-and summarised per evidence item (`Evidence.nli_summary`).
+passed with `retrieve(..., claims=[...])`. Judgments are stored on candidates
+and summarized per evidence item (`Evidence.nli_summary`).
 
 See [Rerank and verify with NLI](../how-to/rerank-and-nli.md).
 
 ## Failure handling
 
-Each method, reranking and NLI has an `on_error` setting:
+A failing model or backend does not have to fail the whole search. Each
+method, reranking and NLI has an `on_error` setting:
 
 - `degrade` (default): the failure is logged, a warning is added and the
   pipeline continues without that stage.
@@ -101,7 +115,8 @@ Always look at `result.warnings` when the status is not `complete`. The
 
 ## Caching
 
-`Components.cache` caches whole results. The default is `NoCache`. With a cache
+Caching returns repeated searches instantly. `Components.cache` caches whole
+results. The default is `NoCache`. With a cache
 such as `InMemoryLRUCache`, only `complete` results are stored. The key covers
 the request (except `request_id` and `principal`), the effective filter, the
 snapshot and the pipeline configuration, so new data or a new generation
@@ -110,7 +125,7 @@ never returns an old result.
 Query embeddings have their own LRU cache, set by `embedding_cache_size`
 and `embedding_cache_ttl`.
 
-## Inspecting a result
+## Inspect a result
 
 ```python
 result = await engine.retrieve("rotate api keys", scope=scope, top_k=5)
@@ -124,3 +139,8 @@ for item in result.evidence:
 
 Pass `RetrievalExecutionConfig(include_candidates=True)` to also get the
 ordered candidates in `result.candidates`.
+
+## Next steps
+
+- Read each result's sources and trace in [Evidence and provenance](evidence.md).
+- Improve ranking with [a reranker and NLI](../how-to/rerank-and-nli.md).

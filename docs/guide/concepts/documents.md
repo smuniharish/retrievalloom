@@ -1,8 +1,13 @@
 # Scopes and documents
 
+Learn how to shape the data you send to RetrievalLoom. A **scope** keeps one
+customer's documents apart from everyone else's. A **document** carries your
+content, metadata and source, and RetrievalLoom versions it each time it
+changes, so every search result can name the exact version it came from.
+
 ## Scope
 
-Every engine call takes a `Scope`. It is the unit of isolation:
+Every engine call takes a `Scope`, which says whose data the call works on:
 
 ```python
 from retrievalloom import Scope
@@ -10,14 +15,15 @@ from retrievalloom import Scope
 scope = Scope(tenant_id="acme", namespace="support", collection="articles")
 ```
 
-`namespace` and `collection` default to `"default"`. Documents, indexes,
-coverage, generations and lifecycle tasks all belong to one scope. A retrieval
-never reads another scope. Per-tenant limits come from the `TenantPolicy` of
-`scope.tenant_id`.
+`namespace` and `collection` default to `"default"`. Everything RetrievalLoom
+stores for a document, including its indexes and background work, belongs to
+one scope, and a search never reads another scope. Per-tenant limits come from
+the `TenantPolicy` of `scope.tenant_id`.
 
 ## Document
 
-A `DocumentInput` is one logical document:
+A `DocumentInput` is one document, such as an article, a manual page or a
+ticket:
 
 ```python
 from retrievalloom import DocumentInput, SourceDescriptor, TextRepresentation
@@ -40,12 +46,14 @@ document = DocumentInput(
 | `representations` | One or more views of the content, each with a unique `representation_id`. |
 | `appearance_id`, `delivery` | Optional delivery information used for redelivery detection. |
 
-Domain models are strict: unknown fields, `inf` and `NaN` are rejected, and
-instances are frozen.
+Documents are validated strictly: unknown fields, `inf` and `NaN` are
+rejected, and instances cannot be changed after creation.
 
 ## Representations
 
-A representation is one view of a document. The `kind` field selects the type.
+A representation is one view of a document's content: plain text, your own
+chunks, a section tree or a knowledge graph. The `kind` field selects the
+type.
 
 | Representation | `kind` | Becomes | Indexed by |
 | --- | --- | --- | --- |
@@ -54,8 +62,9 @@ A representation is one view of a document. The `kind` field selects the type.
 | `StructureRepresentation(root=StructureNodeInput(...))` | `structure` | One node per tree node | Structure channel |
 | `GraphRepresentation(entities=[...], relationships=[...])` | `graph` | Entity and relationship aggregates shared across documents | Graph channel |
 
-RetrievalLoom does not parse files or split text. If you need chunks, produce
-them yourself and pass a `ChunksRepresentation`. Each `ChunkInput` can carry a
+RetrievalLoom does not parse files or split text, so you keep full control of
+chunking. Produce chunks with the tool you already use and pass a
+`ChunksRepresentation`. Each `ChunkInput` can carry a
 `span`, `pages`, `section_path`, `parent_local_id`, `order` and its own
 `metadata`. These locations are copied into evidence sources.
 
@@ -76,10 +85,10 @@ shows this.
 
 ## Versions
 
-`ingest` hashes each document's representations, its `dataset` and its
-metadata (except the keys listed in `transient_metadata_keys`). The result per
-document is an
-`IngestOutcome`:
+You can send the same document as often as you like: RetrievalLoom stores a
+new version only when its content changes. `ingest` hashes each document's
+representations, its `dataset` and its metadata (except the keys listed in
+`transient_metadata_keys`). The result per document is an `IngestOutcome`:
 
 - `created`: first version.
 - `updated`: the hash changed. A new version is stored and the old version's
@@ -98,8 +107,9 @@ generated and the same content arrives again within
 `redelivery_window_seconds`, the report carries a `possible_redelivery`
 warning.
 
-Evidence always names the `document_version` it came from. By default hits
-that point at a superseded version are dropped (`allow_stale_versions=False`).
+Evidence always names the `document_version` it came from. By default, a match
+in a version that has since been replaced is dropped
+(`allow_stale_versions=False`), so results never mix old and new text.
 
 ## Deletion
 
@@ -113,4 +123,10 @@ maintenance erases it after `LifecycleConfig.purge_after`. See
 ## Reserved filter fields
 
 Besides your metadata, filters can use `_id` (the document id) and `_dataset`.
-See [Filter and authorise](../how-to/filters-and-access.md).
+See [Filter and authorize](../how-to/filters-and-access.md).
+
+## Next steps
+
+- Choose which search methods run in [Channels and methods](channels.md).
+- Index your own chunks with the
+  [pre-chunked example](../../examples/prechunked-and-multi-representation.md).

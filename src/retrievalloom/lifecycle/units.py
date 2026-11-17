@@ -26,6 +26,8 @@ STRUCTURE_KINDS = (ObjectKind.STRUCTURE_NODE,)
 GRAPH_KINDS = (ObjectKind.GRAPH_ENTITY, ObjectKind.GRAPH_RELATIONSHIP)
 DICTIONARY_DIGEST = "keyword_entries_digest"
 """Generation stats key holding :func:`dictionary_digest` of the generation's spec."""
+DICTIONARY_REVISION = "keyword_dictionary_revision"
+"""Generation stats key holding the keyword dictionary revision the generation was built at."""
 
 
 def dictionary_digest(spec: GenerationSpec) -> str | None:
@@ -128,14 +130,20 @@ class ItemPreparer:
         self._embedder = embedder
         self._dictionary = dictionary
 
+    def _dictionary_for(self, unit: IndexUnit) -> KeywordDictionaryABC | None:
+        if unit.method in {IndexMethod.KEYWORD.value, IndexMethod.FUZZY.value}:
+            return self._dictionary
+        return None
+
+    async def dictionary_revision(self, unit: IndexUnit, scope: Scope) -> str | None:
+        """Revision of the keyword dictionary ``unit`` is built with; ``None`` without one."""
+        dictionary = self._dictionary_for(unit)
+        return None if dictionary is None else await dictionary.revision(scope)
+
     async def spec(self, unit: IndexUnit, scope: Scope, generation_id: str) -> GenerationSpec:
         """Build parameters of a new generation of ``unit``."""
-        entries = ()
-        if (
-            unit.method in {IndexMethod.KEYWORD.value, IndexMethod.FUZZY.value}
-            and self._dictionary is not None
-        ):
-            entries = tuple(await self._dictionary.entries(scope))
+        dictionary = self._dictionary_for(unit)
+        entries = () if dictionary is None else tuple(await dictionary.entries(scope))
         dimensions = None
         if unit.method == IndexMethod.DENSE.value and self._embedder is not None:
             dimensions = self._embedder.model.dimensions

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -11,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from retrievalloom.domain.base import utc_now
 from retrievalloom.domain.hashing import random_id
 from retrievalloom.domain.records import (
+    Channel,
     CoverageRecord,
     CoverageState,
     DocumentState,
@@ -22,10 +24,15 @@ from retrievalloom.domain.records import (
     TaskKind,
     TaskState,
 )
-from retrievalloom.lifecycle.units import DICTIONARY_DIGEST, dictionary_digest
+from retrievalloom.errors import VersionConflictError
+from retrievalloom.lifecycle.units import (
+    DICTIONARY_DIGEST,
+    DICTIONARY_REVISION,
+    dictionary_digest,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
     from retrievalloom.config import LifecycleConfig
     from retrievalloom.domain.base import Clock
@@ -40,6 +47,17 @@ if TYPE_CHECKING:
 
 _WORK_STATES = (CoverageState.PENDING, CoverageState.STALE)
 _READABLE = frozenset({GenerationState.ACTIVE, GenerationState.RETIRING})
+_LIVE_GENERATIONS = (
+    GenerationState.BUILDING,
+    GenerationState.VALIDATING,
+    GenerationState.ACTIVE,
+    GenerationState.RETIRING,
+)
+_NO_WATERMARK = -1
+# Generation stat: purge-log sequence of the scope a durable generation has applied.
+PURGE_LOG_SEQ = "purge_log_seq"
+
+type GraphDeriver = Callable[[Scope, Sequence[str]], Awaitable[int]]
 
 
 class ReaderTracker:
@@ -142,6 +160,7 @@ class UnitIndexer:
         clock: Clock,
         logger: Any,
         readers: ReaderTracker,
+        derive_graph: GraphDeriver | None = None,
     ) -> None:
         self._store = store
         self._preparer = preparer
@@ -150,6 +169,7 @@ class UnitIndexer:
         self._clock = clock
         self._logger = logger
         self._readers = readers
+        self._derive_graph = derive_graph
         self._locks: dict[tuple[str, str], asyncio.Lock] = defaultdict(asyncio.Lock)
 
     # inspection -----------------------------------------------------------------------
@@ -165,7 +185,14 @@ class UnitIndexer:
                 return True
             if await transaction.list_coverage(key, _WORK_STATES, limit=1):
                 return True
-            if await transaction.documents_missing_coverage(key, limit=1):
+            watermark = await transaction.get_coverage_watermark(key)
+            if await transaction.list_changed_documents(
+                scope.key, after_seq=_NO_WATERMARK if watermark is None else watermark, limit=1
+            ):
+                return True
+            if not unit.instance and await transaction.list_purge_log(
+                scope.key, after_seq=_purge_log_seq(generation), limit=1
+            ):
                 return True
             return bool(await self._rebuild_tasks(transaction, scope, unit))
 
@@ -194,6 +221,8 @@ class UnitIndexer:
         async with self.lock(scope, unit):
             key = unit.key(scope)
             await self._create_missing_coverage(scope, unit)
+            if unit.channel == Channel.GRAPH and self._derive_graph is not None:
+                await self._catch_up_graph(scope, unit, self._derive_graph)
             async with self._store.transaction(scope, write=False) as transaction:
                 pointer = await transaction.get_pointer(key)
                 generation = (
@@ -202,6 +231,8 @@ class UnitIndexer:
                     else await transaction.get_generation(pointer.generation_id)
                 )
                 rebuild = bool(await self._rebuild_tasks(transaction, scope, unit))
+            if generation is not None and not unit.instance:
+                rebuild = not await self._apply_purge_log(scope, unit, generation) or rebuild
             if pointer is not None and unit.per_document:
                 await self._remove_deleted(scope, unit, pointer.generation_id)
             full = (
@@ -218,6 +249,35 @@ class UnitIndexer:
                 assert pointer is not None
                 await self._incremental(scope, unit, pointer.generation_id)
 
+    async def _catch_up_graph(self, scope: Scope, unit: IndexUnit, derive: GraphDeriver) -> None:
+        """Derive graph contributions of pending documents ingested while graph was off.
+
+        Ingestion derives graph contributions only while the graph channel is
+        configured; documents ingested before it was enabled have none, so they are
+        derived here, before the build that covers them.
+        """
+        key = unit.key(scope)
+        cursor: str | None = None
+        while True:
+            async with self._store.transaction(scope, write=False) as transaction:
+                rows = await transaction.list_coverage(
+                    key, _WORK_STATES, limit=self._config.batch_size, after_document_uid=cursor
+                )
+            if not rows:
+                return
+            await derive(scope, [row.document_uid for row in rows])
+            if len(rows) < self._config.batch_size:
+                return
+            cursor = rows[-1].document_uid
+
+    async def rebuild(self, scope: Scope, unit: IndexUnit) -> None:
+        """Replace the published generation of ``unit`` with a full build (no-op if none)."""
+        async with self.lock(scope, unit):
+            async with self._store.transaction(scope, write=False) as transaction:
+                pointer = await transaction.get_pointer(unit.key(scope))
+            if pointer is not None:
+                await self._full_build(scope, unit, pointer)
+
     async def _has_pending(self, scope: Scope, unit: IndexUnit) -> bool:
         async with self._store.transaction(scope, write=False) as transaction:
             return bool(await transaction.list_coverage(unit.key(scope), _WORK_STATES, limit=1))
@@ -228,20 +288,38 @@ class UnitIndexer:
         """Whether the keyword dictionary still equals the one ``generation`` was built with.
 
         A dictionary change (e.g. new keywords in document metadata) affects objects that
-        did not change, so it needs a full build rather than an in-place update.
+        did not change, so it needs a full build rather than an in-place update. The
+        check compares dictionary revisions, which are cheap to read, not the entries.
         """
-        spec = await self._preparer.spec(unit, scope, generation.generation_id)
-        return generation.stats.get(DICTIONARY_DIGEST) == dictionary_digest(spec)
+        revision = await self._preparer.dictionary_revision(unit, scope)
+        return generation.stats.get(DICTIONARY_REVISION) == revision
 
     async def _create_missing_coverage(self, scope: Scope, unit: IndexUnit) -> None:
+        """Create pending coverage rows for active documents that have none.
+
+        Only documents changed after the unit's coverage watermark are read, so a pass
+        costs what changed since the last one; a unit without a watermark (new unit or
+        engine instance) reads the whole scope once. Writers of a scope are serialised
+        and allocate ``change_seq`` in commit order, so no document can later appear at
+        or below a watermark taken inside a write transaction.
+        """
         key = unit.key(scope)
         while True:
             async with self._store.transaction(scope, write=True) as transaction:
-                missing = await transaction.documents_missing_coverage(
-                    key, limit=self._config.batch_size
+                watermark = await transaction.get_coverage_watermark(key)
+                changed = await transaction.list_changed_documents(
+                    scope.key,
+                    after_seq=_NO_WATERMARK if watermark is None else watermark,
+                    limit=self._config.batch_size,
                 )
-                if not missing:
+                if not changed:
                     return
+                active = [
+                    document for document in changed if document.state == DocumentState.ACTIVE
+                ]
+                covered = await transaction.get_coverage(
+                    key, [document.document_uid for document in active]
+                )
                 now = self._clock()
                 await transaction.upsert_coverage(
                     [
@@ -255,10 +333,12 @@ class UnitIndexer:
                             state=CoverageState.PENDING,
                             updated_at=now,
                         )
-                        for document in missing
+                        for document in active
+                        if document.document_uid not in covered
                     ]
                 )
-            if len(missing) < self._config.batch_size:
+                await transaction.set_coverage_watermark(key, changed[-1].change_seq)
+            if len(changed) < self._config.batch_size:
                 return
 
     async def _remove_deleted(self, scope: Scope, unit: IndexUnit, generation_id: str) -> None:
@@ -306,12 +386,61 @@ class UnitIndexer:
                     ]
                 )
 
+    async def _apply_purge_log(
+        self, scope: Scope, unit: IndexUnit, generation: IndexGeneration
+    ) -> bool:
+        """Remove documents purged since ``generation`` was built from the durable backend.
+
+        A durable unit keeps its generations across restarts, including restarts with
+        the unit unconfigured, while purges only reach the backends of configured units.
+        The purge log closes that gap. Returns ``False`` when a full build is needed
+        instead: entries were pruned before they were applied, or the unit cannot
+        remove objects in place (its derived objects are not owned by one document).
+        """
+        seen = _purge_log_seq(generation)
+        head = seen
+        while True:
+            async with self._store.transaction(scope, write=False) as transaction:
+                entries = await transaction.list_purge_log(
+                    scope.key, after_seq=head, limit=self._config.batch_size
+                )
+                generations = [
+                    live.generation_id
+                    for live in await transaction.list_generations(
+                        scope_key=scope.key, states=_LIVE_GENERATIONS, instances=[None]
+                    )
+                    if live.channel == unit.channel and live.method == unit.method
+                ]
+            if not entries:
+                break
+            if entries[0].seq != head + 1 or not unit.incremental:
+                return False
+            object_ids = sorted({oid for entry in entries for oid in entry.object_ids})
+            for generation_id in generations:
+                await unit.backend.remove(scope, generation_id, object_ids)
+            head = entries[-1].seq
+        if head == seen:
+            return True
+        with contextlib.suppress(VersionConflictError):
+            async with self._store.transaction(scope, write=True) as transaction:
+                current = await transaction.get_generation(generation.generation_id)
+                if current is not None and _purge_log_seq(current) < head:
+                    await transaction.put_generation(
+                        current.model_copy(
+                            update={"stats": {**current.stats, PURGE_LOG_SEQ: head}}
+                        ),
+                        expected_revision=current.row_revision,
+                    )
+        self._logger.info("purge_log_applied", scope=scope.key, unit=unit.name, purge_log_seq=head)
+        return True
+
     # full build -----------------------------------------------------------------------
     async def _full_build(self, scope: Scope, unit: IndexUnit, pointer: PointerRow | None) -> None:
         now = self._clock()
         generation_id = random_id("gen")
         async with self._store.transaction(scope, write=True) as transaction:
             watermark = await transaction.current_commit_seq()
+            purged = (await transaction.purge_log_heads()).get(scope.key, 0)
             generation = IndexGeneration(
                 generation_id=generation_id,
                 scope_key=scope.key,
@@ -337,13 +466,18 @@ class UnitIndexer:
             watermark=watermark,
         )
         try:
+            revision = await self._preparer.dictionary_revision(unit, scope)
             spec = await self._preparer.spec(unit, scope, generation_id)
             await unit.backend.create_generation(scope, spec)
             included = await self._write_all(scope, unit, generation_id)
             stats = await unit.backend.seal(scope, generation_id)
             details = stats.model_dump(mode="json")
+            details[PURGE_LOG_SEQ] = purged
             if (digest := dictionary_digest(spec)) is not None:
                 details[DICTIONARY_DIGEST] = digest
+            if revision is not None:
+                # Read before the entries: a change in between only causes another build.
+                details[DICTIONARY_REVISION] = revision
             retired = await self._publish(
                 scope,
                 unit,
@@ -601,15 +735,14 @@ class UnitIndexer:
         stale: list[str] = []
         now = self._clock()
         async with self._store.transaction(scope, write=True) as transaction:
-            current = await transaction.get_documents_by_uid(
+            current = await transaction.get_change_seqs(
                 scope.key, [document.document_uid for _, document, _ in work]
             )
             seq = await transaction.next_commit_seq()
             updates: list[CoverageRecord] = []
             published: list[DocumentRecord] = []
             for row, document, objects in work:
-                latest = current.get(document.document_uid)
-                if latest is None or latest.change_seq != document.change_seq:
+                if current.get(document.document_uid) != document.change_seq:
                     continue  # changed while writing; stays pending for the next pass
                 published.append(document)
                 state = CoverageState.READY if objects else CoverageState.NOT_APPLICABLE
@@ -781,6 +914,12 @@ def _supporting_versions(obj: DerivedObject) -> list[tuple[str, int]]:
 
 def _error(exc: BaseException) -> ErrorInfo:
     return ErrorInfo.from_exception(exc)
+
+
+def _purge_log_seq(generation: IndexGeneration) -> int:
+    """Purge-log sequence ``generation`` has applied (``0`` if never recorded)."""
+    seq = generation.stats.get(PURGE_LOG_SEQ)
+    return seq if isinstance(seq, int) else 0
 
 
 __all__ = ["ReaderTracker", "UnitIndexer"]

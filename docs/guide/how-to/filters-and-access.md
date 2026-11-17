@@ -1,15 +1,21 @@
-# Filter and authorise
+# Filter and authorize
 
-## Scopes
+Show each user only the documents they are allowed to see. Three layers decide
+what a request can see: the scope it runs in, the metadata filters it passes,
+and your access policy, which can deny an operation or restrict every search to
+the caller's own rows.
+
+## Isolate customers with scopes
 
 Every operation runs in a `Scope(tenant_id, namespace="default",
 collection="default")`. Scopes are isolated: documents, indexes, coverage and
 caches of one scope are never visible from another. A request reads exactly
 one scope.
 
-## Metadata filters
+## Filter by metadata
 
-Pass a filter expression to `retrieve(..., filters=...)`. Only evidence from
+Narrow a search to a language, product, team or date range. Pass a filter
+expression to `retrieve(..., filters=...)`. Only evidence from
 documents that match is returned.
 
 ```python
@@ -42,7 +48,7 @@ filters = And(
   `_dataset`.
 - A filter may hold at most `RetrievalConfig.max_filter_nodes` (64) nodes.
 
-### Pushdown
+### Where filters are applied
 
 Qdrant and the in-memory indexes apply filters inside the search
 (`filter_pushdown`). LadybugDB and TreeSearch cannot: they search unfiltered
@@ -51,7 +57,7 @@ and the engine drops non-matching results afterwards, adding a
 results than `top_k`. The engine re-checks every filter on every candidate in
 any case.
 
-## Access policies
+## Enforce access rules
 
 The access policy decides who may do what, and can add a mandatory filter to
 every retrieval. The default, `AllowAllAccessPolicy`, allows everything and
@@ -132,9 +138,16 @@ asyncio.run(main())
 ```
 
 - `authorize(principal, scope, action)` runs before `ingest`, `delete`,
-  `retrieve`, `backfill`, `rebuild` and `status`. A denial raises
+  `purge` (authorized as `delete`), `retrieve`, `backfill`, `rebuild` and
+  `status`. A denial raises
   `AccessDeniedError` with the action and reason in `details`.
 - `row_filter(principal, scope)` runs for each retrieval. The engine combines
   it with the request's filters using `And`, so callers cannot widen it.
 - `principal` is an opaque string you pass to each call. Authenticate callers
   before you pass it.
+
+## Next steps
+
+- See tenant isolation, roles and quotas together in the
+  [multi-tenant SaaS example](../../examples/multi-tenant-saas.md).
+- Review the security model on [Security](../../security.md).

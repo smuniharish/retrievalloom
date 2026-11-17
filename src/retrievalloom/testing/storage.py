@@ -27,6 +27,7 @@ from retrievalloom.domain.records import (
     LineageRelation,
     ObjectContribution,
     ObjectKind,
+    ObjectState,
     RepresentationSnapshot,
     SourceReference,
     TaskKind,
@@ -448,6 +449,154 @@ class MetadataStoreContract(ComponentContract):
         }
         assert rows[uids[0]].row_revision == rows[uids[2]].row_revision + 1
 
+    async def test_batched_document_retirement(self, component: Any) -> None:
+        """Object states, contributions, lineage and visibility change for many documents."""
+        unit = UnitKey(scope_key=SCOPE.key, channel="index", method="keyword")
+        records = [document(SCOPE, f"retire-{n}", change_seq=n + 7) for n in range(2)]
+        uids = [record.document_uid for record in records]
+        foreign = document(OTHER_SCOPE, "retire-x")
+        async with component.transaction(OTHER_SCOPE, write=True) as tx:
+            await tx.ensure_scope(OTHER_SCOPE)
+            await tx.put_document(foreign, expected_revision=None)
+        async with component.transaction(SCOPE, write=True) as tx:
+            await tx.ensure_scope(SCOPE)
+            seeded = []
+            for record in records:
+                await tx.put_document(record, expected_revision=None)
+                seeded.append(await _seed_history(tx, record, 2))
+            await tx.set_documents_objects_state(
+                SCOPE.key, {uids[0]: 2, uids[1]: None}, ObjectState.SUPERSEDED
+            )
+            await tx.set_documents_objects_state(SCOPE.key, {}, ObjectState.SUPERSEDED)
+            retracted = await tx.retract_contributions(SCOPE.key, [uids[1], uids[0], uids[1]])
+            await tx.close_visibility_many(SCOPE.key, [uids[0], uids[1], uids[0]], 5)
+            await tx.close_visibility_many(SCOPE.key, [], 5)
+        chunks = [objects[0].object_id for objects in seeded]
+        entities = [objects[1].object_id for objects in seeded]
+        async with component.transaction(SCOPE, write=False) as tx:
+            listed = await tx.list_objects_for_documents(SCOPE.key, [(uid, None) for uid in uids])
+            contributions = await tx.get_contributions(SCOPE.key, entities)
+            edges = await tx.get_lineage_many(SCOPE.key, [chunks[0], uids[0], uids[1]])
+            before = await tx.visible_versions(unit, uids, 4)
+            after = await tx.visible_versions(unit, uids, 5)
+            seqs = await tx.get_change_seqs(SCOPE.key, [*uids, uids[0], foreign.document_uid])
+            assert await tx.get_lineage_many(SCOPE.key, []) == []
+        assert {uid: [obj.state for obj in listed[uid]] for uid in uids} == {
+            uids[0]: [ObjectState.LIVE],
+            uids[1]: [ObjectState.SUPERSEDED],
+        }
+        assert list(retracted) == sorted(entities)
+        assert list(contributions) == []
+        assert [(edge.from_id, edge.to_id) for edge in edges] == sorted(
+            [
+                (chunks[0], uids[0]),
+                (entities[0], uids[0]),
+                (chunks[1], uids[1]),
+                (entities[1], uids[1]),
+            ]
+        )
+        assert dict(before) == {uid: frozenset({2}) for uid in uids}
+        assert dict(after) == {}
+        assert dict(seqs) == {uids[0]: 7, uids[1]: 8}
+
+    async def test_snapshot_marker(self, component: Any) -> None:
+        """The marker carries the commit sequence; a token, if any, moves with writes."""
+        unit = UnitKey(scope_key=SCOPE.key, channel="index", method="keyword")
+        built = generation(SCOPE)
+        writes = [
+            lambda tx: tx.put_documents([(document(SCOPE, "marker"), None)]),
+            lambda tx: tx.put_generation(built, expected_revision=None),
+            lambda tx: tx.set_pointer(unit, built.generation_id, expected_revision=None),
+            lambda tx: tx.upsert_coverage(
+                [
+                    CoverageRecord(
+                        scope_key=SCOPE.key,
+                        document_uid=stable_id("doc", "marker"),
+                        channel=Channel.INDEX,
+                        method="keyword",
+                        target_version=1,
+                        state=CoverageState.PENDING,
+                        updated_at=utc_now(),
+                    )
+                ]
+            ),
+        ]
+        async with component.transaction(SCOPE, write=True) as tx:
+            await tx.ensure_scope(SCOPE)
+        tokens = []
+        for write in writes:
+            async with component.transaction(SCOPE, write=True) as tx:
+                await write(tx)
+            async with component.transaction(SCOPE, write=False) as tx:
+                seq, token = await tx.snapshot_marker(SCOPE.key)
+                assert seq == await tx.current_commit_seq()
+                assert await tx.snapshot_marker(SCOPE.key) == (seq, token)
+            tokens.append(token)
+        assert tokens == [None] * len(writes) or (
+            None not in tokens and len(set(tokens)) == len(writes)
+        )
+
+    async def test_changed_documents_and_coverage_watermarks(self, component: Any) -> None:
+        """Changed documents page by ``change_seq`` groups; watermarks are per unit."""
+        seqs = {"c-a": 1, "c-b": 2, "c-c": 2, "c-d": 3}
+        shared = UnitKey(scope_key=SCOPE.key, channel="index", method="keyword")
+        local = UnitKey(scope_key=SCOPE.key, channel="index", method="keyword", instance="inst-w")
+        async with component.transaction(SCOPE, write=True) as tx:
+            await tx.ensure_scope(SCOPE)
+            await tx.put_documents(
+                [(document(SCOPE, name, change_seq=seq), None) for name, seq in seqs.items()]
+            )
+            assert await tx.get_coverage_watermark(shared) is None
+            await tx.set_coverage_watermark(shared, 2)
+            await tx.set_coverage_watermark(shared, 3)
+            await tx.set_coverage_watermark(local, 1)
+        async with component.transaction(SCOPE, write=False) as tx:
+            group = await tx.list_changed_documents(SCOPE.key, after_seq=0, limit=2)
+            first = await tx.list_changed_documents(SCOPE.key, after_seq=0, limit=1)
+            rest = await tx.list_changed_documents(SCOPE.key, after_seq=2)
+            done = await tx.list_changed_documents(SCOPE.key, after_seq=3)
+            marks = (
+                await tx.get_coverage_watermark(shared),
+                await tx.get_coverage_watermark(local),
+            )
+        ties = sorted(("c-b", "c-c"), key=lambda name: stable_id("doc", SCOPE.key, name))
+        assert [item.document_id for item in group] == ["c-a", *ties]
+        assert [item.document_id for item in first] == ["c-a"]
+        assert [(item.document_id, item.change_seq) for item in rest] == [("c-d", 3)]
+        assert list(done) == []
+        assert marks == (3, 1)
+        async with component.transaction(write=True) as tx:
+            await tx.purge_instance("inst-w")
+        async with component.transaction(SCOPE, write=False) as tx:
+            assert await tx.get_coverage_watermark(local) is None
+            assert await tx.get_coverage_watermark(shared) == 3
+
+    async def test_keyword_dictionaries(self, component: Any) -> None:
+        """Term counts adjust in place; the revision moves only when terms come or go."""
+        async with component.transaction(SCOPE, write=True) as tx:
+            await tx.ensure_scope(SCOPE)
+            assert list(await tx.list_keyword_dictionaries(SCOPE.key)) == []
+            await tx.create_keyword_dictionary(
+                SCOPE.key, "dict", ["keywords"], {"beta": 1, "Alpha": 2, "zero": 0}
+            )
+            with pytest.raises(VersionConflictError):
+                await tx.create_keyword_dictionary(SCOPE.key, "dict", ["keywords"], {})
+        async with component.transaction(SCOPE, write=True) as tx:
+            await tx.adjust_keyword_terms(SCOPE.key, "dict", {"Alpha": -1, "beta": 2})
+            await tx.adjust_keyword_terms(SCOPE.key, "dict", {"beta": 0})
+            await tx.adjust_keyword_terms(SCOPE.key, "missing", {"beta": 1})
+            assert await tx.list_keyword_terms(SCOPE.key, "missing") == []
+            unchanged = await tx.list_keyword_dictionaries(SCOPE.key)
+            await tx.adjust_keyword_terms(SCOPE.key, "dict", {"Alpha": -1, "gamma": 1, "delta": -1})
+        async with component.transaction(SCOPE, write=False) as tx:
+            states = await tx.list_keyword_dictionaries(SCOPE.key)
+            terms = await tx.list_keyword_terms(SCOPE.key, "dict")
+        assert [(s.dictionary_id, s.fields, s.revision) for s in unchanged] == [
+            ("dict", ("keywords",), 1)
+        ]
+        assert [state.revision for state in states] == [2]
+        assert list(terms) == ["beta", "gamma"]
+
     async def test_generations_and_pointer_cas(self, component: Any) -> None:
         """Generations CAS by revision; pointers publish with compare-and-set."""
         built = generation(SCOPE)
@@ -600,6 +749,70 @@ class MetadataStoreContract(ComponentContract):
         async with component.transaction(OTHER_SCOPE, write=False) as tx:
             assert await tx.get_document(OTHER_SCOPE, "doc-purge") is not None
             assert len(await tx.get_versions(other.document_uid)) == 2
+
+    async def test_purge_documents_appends_to_the_purge_log(self, component: Any) -> None:
+        """Batch purges log one dense, per-scope entry per erased document."""
+        records = [
+            document(SCOPE, f"doc-batch-{i}", 1, state=DocumentState.DELETED) for i in (1, 2)
+        ]
+        async with component.transaction(write=True) as tx:
+            await tx.ensure_scope(SCOPE)
+            await tx.ensure_scope(OTHER_SCOPE)
+        async with component.transaction(SCOPE, write=True) as tx:
+            start = (await tx.purge_log_heads()).get(SCOPE.key, 0)
+            objects = []
+            for record in records:
+                await tx.put_document(record, expected_revision=None)
+                objects.append(await _seed_history(tx, record, 1))
+        purged_at = utc_now()
+        async with component.transaction(SCOPE, write=True) as tx:
+            uids = {record.document_uid: [] for record in records}
+            assert await tx.purge_documents(SCOPE.key, uids, purged_at=purged_at) > 0
+            assert await tx.purge_documents(SCOPE.key, uids, purged_at=purged_at) == 0
+        async with component.transaction(SCOPE, write=False) as tx:
+            entries = await tx.list_purge_log(SCOPE.key, after_seq=start)
+            assert (await tx.purge_log_heads()) == {SCOPE.key: start + 2}
+            for record in records:
+                assert await tx.get_document(SCOPE, record.document_id) is None
+        assert [entry.seq for entry in entries] == [start + 1, start + 2]
+        assert sorted(entry.document_uid for entry in entries) == sorted(uids)
+        for entry in entries:
+            assert entry.scope_key == SCOPE.key
+            assert entry.purged_at == purged_at
+            assert entry.object_ids
+        later = purged_at + timedelta(seconds=1)
+        async with component.transaction(SCOPE, write=True) as tx:
+            assert await tx.prune_purge_log(SCOPE.key, before=later) >= 1
+            remaining = await tx.list_purge_log(SCOPE.key, after_seq=0)
+        assert [entry.seq for entry in remaining] == [start + 2]
+        async with component.transaction(OTHER_SCOPE, write=False) as tx:
+            assert SCOPE.key not in await tx.purge_log_heads()
+
+    async def test_retention_keeps_versions_referenced_by_events(self, component: Any) -> None:
+        """A version stays while an ingestion event names it as ``version_after``."""
+        record = document(SCOPE, "doc-evented", 3)
+        async with component.transaction(SCOPE, write=True) as tx:
+            await tx.ensure_scope(SCOPE)
+            await tx.put_document(record, expected_revision=None)
+            await _seed_history(tx, record, 3)
+            await tx.put_event(
+                IngestionEvent(
+                    event_id=random_id("evt"),
+                    scope=SCOPE,
+                    document_id=record.document_id,
+                    document_uid=record.document_uid,
+                    received_at=utc_now() - timedelta(days=2),
+                    status=EventStatus.COMMITTED,
+                    content_hash=sha256_digest("c"),
+                    appearance_fingerprint=sha256_digest("evented"),
+                    version_after=1,
+                )
+            )
+            assert await tx.prune_versions(SCOPE.key, keep=1) == 1
+            assert [item.version for item in await tx.get_versions(record.document_uid)] == [1, 3]
+            assert await tx.prune_events(SCOPE.key, before=utc_now() - timedelta(days=1)) == 1
+            assert await tx.prune_versions(SCOPE.key, keep=1) == 1
+            assert [item.version for item in await tx.get_versions(record.document_uid)] == [3]
 
     async def test_retention_prunes_versions_and_events(self, component: Any) -> None:
         """Old unprotected versions and old terminal events are pruned; the rest stay."""

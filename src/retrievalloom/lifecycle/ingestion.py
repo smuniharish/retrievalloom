@@ -7,8 +7,11 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
+from pydantic import TypeAdapter
+
 from retrievalloom.config import FailurePolicy
 from retrievalloom.contracts.models import ExtractionSource, GraphExtraction
+from retrievalloom.domain.inputs import DocumentInput, Representation
 from retrievalloom.domain.records import (
     CoverageState,
     DocumentRecord,
@@ -26,6 +29,7 @@ from retrievalloom.domain.records import (
 from retrievalloom.domain.reports import DeleteReport, DocumentIngestResult, IngestReport
 from retrievalloom.domain.retrieval import RetrievalWarning, Severity, WarningCode
 from retrievalloom.errors import RetrievalLoomError, ValidationError, VersionConflictError
+from retrievalloom.index.text import track_keyword_changes
 from retrievalloom.lifecycle.canonical import (
     CanonicalDocument,
     canonicalize,
@@ -38,13 +42,15 @@ from retrievalloom.lifecycle.derivation import (
     derive_chunks,
     derive_structure,
     graph_contributions,
+    graph_marker,
+    graph_marker_id,
+    is_graph_marker,
     lineage_for,
     recompute_aggregates,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
-    from typing import Literal
 
     from retrievalloom.config import IngestionConfig
     from retrievalloom.contracts.models import (
@@ -53,7 +59,7 @@ if TYPE_CHECKING:
         NormalizedGraph,
     )
     from retrievalloom.domain.base import Clock
-    from retrievalloom.domain.inputs import DocumentInput, Scope
+    from retrievalloom.domain.inputs import Scope
     from retrievalloom.domain.records import DerivedObject
     from retrievalloom.storage.base import DocumentMetadataStoreABC, MetadataTransactionABC
 
@@ -231,14 +237,9 @@ class IngestionService:
     ) -> NormalizedGraph | None:
         """Normalised graph of the document, or ``None`` when it has no graph input."""
         document = canonical.document
-        provided = graph_representation(document)
-        if provided is not None:
-            extraction = GraphExtraction(
-                entities=provided.entities, relationships=provided.relationships
-            )
-        elif derivation.extractor is not None:
-            bound = index_representation(document)
-            if bound is None:
+        version = 1
+        if graph_representation(document) is None:
+            if derivation.extractor is None or index_representation(document) is None:
                 return None
             async with self._store.transaction(canonical.scope, write=False) as transaction:
                 current = await transaction.get_document(canonical.scope, document.id)
@@ -248,12 +249,31 @@ class IngestionService:
                 and current.content_hash == canonical.content_hash
             ):
                 return None
-            if current is None:
-                version = 1
-            elif current.content_hash == canonical.content_hash:
-                version = current.version
-            else:
-                version = current.version + 1
+            if current is not None:
+                same = current.content_hash == canonical.content_hash
+                version = current.version if same else current.version + 1
+        return await self._graph_of(
+            derivation, canonical.scope, document, canonical.document_uid, version
+        )
+
+    @staticmethod
+    async def _graph_of(
+        derivation: GraphDerivation,
+        scope: Scope,
+        document: DocumentInput,
+        uid: str,
+        version: int,
+    ) -> NormalizedGraph | None:
+        """Normalised graph of the provided ``graph`` representation or of the extractor."""
+        provided = graph_representation(document)
+        if provided is not None:
+            extraction = GraphExtraction(
+                entities=provided.entities, relationships=provided.relationships
+            )
+        else:
+            bound = index_representation(document)
+            if derivation.extractor is None or bound is None:
+                return None
             texts = (
                 (bound.text,)
                 if bound.kind == "text"
@@ -261,18 +281,116 @@ class IngestionService:
             )
             extraction = await derivation.extractor.extract(
                 ExtractionSource(
-                    scope=canonical.scope,
+                    scope=scope,
                     document_id=document.id,
-                    document_uid=canonical.document_uid,
+                    document_uid=uid,
                     version=version,
                     representation_id=bound.representation_id,
                     texts=texts,
                     metadata=dict(document.metadata),
                 )
             )
-        else:
-            return None
-        return await derivation.normalizer.normalize(extraction, canonical.scope)
+        return await derivation.normalizer.normalize(extraction, scope)
+
+    async def derive_graph(self, scope: Scope, document_uids: Sequence[str]) -> int:
+        """Derive graph contributions of documents whose current version has none.
+
+        Ingestion derives the graph only while the graph channel is enabled, so documents
+        ingested or changed while it was off have no contributions for their current
+        version (no derivation marker). The graph unit calls this for its pending
+        documents before building: the stored ``graph`` representation is replayed, or
+        the extractor runs on the stored index representation, exactly as at ingest.
+        Documents changed meanwhile are skipped; their next pass covers them. A
+        non-retryable extraction failure is logged and recorded as an empty graph so it
+        cannot block the unit; retryable failures propagate. Returns the documents derived.
+        """
+        derivation = self._graph
+        if derivation is None or not document_uids:
+            return 0
+        async with self._store.transaction(scope, write=False) as transaction:
+            documents = await transaction.get_documents_by_uid(scope.key, document_uids)
+            markers = {
+                contribution.document_uid: contribution.version
+                for contribution in await transaction.get_contributions(
+                    scope.key, [graph_marker_id(uid) for uid in document_uids]
+                )
+            }
+            todo = [
+                document
+                for document in documents.values()
+                if document.state == DocumentState.ACTIVE
+                and markers.get(document.document_uid) != document.version
+            ]
+            inputs = {
+                document.document_uid: _stored_document(
+                    document, await transaction.get_representations(
+                        document.document_uid, document.version
+                    )
+                )
+                for document in todo
+            }  # fmt: skip
+        if not todo:
+            return 0
+        graphs: dict[str, NormalizedGraph | None] = {}
+        semaphore = asyncio.Semaphore(self._config.concurrency)
+
+        async def extract(document: DocumentRecord) -> None:
+            async with semaphore:
+                uid = document.document_uid
+                try:
+                    graphs[uid] = await self._graph_of(
+                        derivation, scope, inputs[uid], uid, document.version
+                    )
+                except Exception as exc:
+                    info = ErrorInfo.from_exception(exc)
+                    if info.retryable:
+                        raise
+                    self._logger.warning(
+                        "graph_derivation_failed",
+                        scope=scope.key,
+                        document_uid=uid,
+                        error_code=info.code,
+                    )
+                    graphs[uid] = None
+
+        try:
+            async with asyncio.TaskGroup() as group:
+                for document in todo:
+                    group.create_task(extract(document))
+        except ExceptionGroup as group_error:
+            raise group_error.exceptions[0] from None
+        derived = 0
+        async with self._store.transaction(scope, write=True) as transaction:
+            current = await transaction.get_documents_by_uid(
+                scope.key, [document.document_uid for document in todo]
+            )
+            affected: set[str] = set()
+            for document in todo:
+                latest = current.get(document.document_uid)
+                if latest is None or latest.change_seq != document.change_seq:
+                    continue
+                graph = graphs[document.document_uid]
+                contributions = [
+                    *(
+                        graph_contributions(
+                            document,
+                            self._graph_representation_id(inputs[document.document_uid]),
+                            graph,
+                        )
+                        if graph is not None
+                        else []
+                    ),
+                    graph_marker(document),
+                ]
+                affected.update(
+                    await transaction.replace_contributions(
+                        scope.key, document.document_uid, contributions
+                    )
+                )
+                derived += 1
+            await self.refresh_aggregates(transaction, scope, sorted(affected))
+        self._logger.info("graph_caught_up", scope=scope.key, documents=derived)
+        return derived
 
     def _graph_representation_id(self, document: DocumentInput) -> str:
         provided = graph_representation(document)
@@ -419,6 +537,11 @@ class IngestionService:
                 for item in written
             ]
         )
+        await track_keyword_changes(
+            transaction,
+            scope.key,
+            [(item.previous, item.record) for item in written if item.changed],
+        )
         new_versions = [item for item in written if item.content_changed]
         await transaction.put_versions(
             scope.key,
@@ -558,14 +681,15 @@ class IngestionService:
         if objects:
             await transaction.put_objects(objects)
             await transaction.put_lineage(lineage_for(objects))
-        for item in changed:
-            if item.previous is not None and item.previous.version != item.record.version:
-                await transaction.set_document_objects_state(
-                    scope.key,
-                    item.record.document_uid,
-                    ObjectState.SUPERSEDED,
-                    exclude_version=item.record.version,
-                )
+        await transaction.set_documents_objects_state(
+            scope.key,
+            {
+                item.record.document_uid: item.record.version
+                for item in changed
+                if item.previous is not None and item.previous.version != item.record.version
+            },
+            ObjectState.SUPERSEDED,
+        )
         if self._graph is None:
             return
         affected: set[str] = set()
@@ -578,15 +702,18 @@ class IngestionService:
                 and previous.state == DocumentState.ACTIVE
             ):
                 continue  # unchanged content: contributions are already current
-            contributions = (
-                graph_contributions(
-                    item.record,
-                    self._graph_representation_id(item.canonical.document),
-                    item.graph,
-                )
-                if item.graph is not None
-                else []
-            )
+            contributions = [
+                *(
+                    graph_contributions(
+                        item.record,
+                        self._graph_representation_id(item.canonical.document),
+                        item.graph,
+                    )
+                    if item.graph is not None
+                    else []
+                ),
+                graph_marker(item.record),
+            ]
             affected.update(
                 await transaction.replace_contributions(
                     scope.key, item.record.document_uid, contributions
@@ -601,6 +728,7 @@ class IngestionService:
         transaction: MetadataTransactionABC, scope: Scope, object_ids: Sequence[str]
     ) -> None:
         """Recompute graph aggregates from their contributions."""
+        object_ids = [oid for oid in object_ids if not is_graph_marker(oid)]
         if not object_ids:
             return
         contributions = await transaction.get_contributions(scope.key, object_ids)
@@ -653,44 +781,90 @@ class IngestionService:
     async def _delete_batch(
         self, document_ids: list[str], scope: Scope
     ) -> tuple[list[str], list[str], list[str]]:
+        """Tombstone ``document_ids`` in one write transaction at one commit sequence."""
         outcomes: dict[str, list[str]] = {"deleted": [], "already": [], "missing": []}
+        active: list[DocumentRecord] = []
         async with self._store.transaction(scope, write=True) as transaction:
             await transaction.ensure_scope(scope)
+            found = await transaction.get_documents(scope, document_ids)
             for document_id in document_ids:
-                state = await self._delete_one(transaction, scope, document_id)
-                outcomes[state].append(document_id)
+                current = found.get(document_id)
+                if current is None:
+                    outcomes["missing"].append(document_id)
+                elif current.state == DocumentState.DELETED:
+                    outcomes["already"].append(document_id)
+                else:
+                    outcomes["deleted"].append(document_id)
+                    active.append(current)
+            changes = await self._tombstone(transaction, scope, active) if active else []
+            await track_keyword_changes(transaction, scope.key, changes)
         return outcomes["deleted"], outcomes["already"], outcomes["missing"]
 
-    async def _delete_one(
-        self, transaction: MetadataTransactionABC, scope: Scope, document_id: str
-    ) -> Literal["deleted", "already", "missing"]:
-        current = await transaction.get_document(scope, document_id)
-        if current is None:
-            return "missing"
-        if current.state == DocumentState.DELETED:
-            return "already"
+    async def _tombstone(
+        self,
+        transaction: MetadataTransactionABC,
+        scope: Scope,
+        documents: Sequence[DocumentRecord],
+    ) -> list[tuple[DocumentRecord, DocumentRecord]]:
+        """Tombstone active documents; return ``(before, after)`` pairs."""
         now = self._clock()
         seq = await transaction.next_commit_seq()
-        record = current.model_copy(
-            update={
-                "state": DocumentState.DELETED,
-                "deleted_at": now,
-                "lifecycle_revision": current.lifecycle_revision + 1,
-                "change_seq": seq,
-            }
+        changes = [
+            (
+                current,
+                current.model_copy(
+                    update={
+                        "state": DocumentState.DELETED,
+                        "deleted_at": now,
+                        "lifecycle_revision": current.lifecycle_revision + 1,
+                        "change_seq": seq,
+                    }
+                ),
+            )
+            for current in documents
+        ]
+        await transaction.put_documents(
+            [(record, current.row_revision) for current, record in changes]
         )
-        await transaction.put_document(record, expected_revision=current.row_revision)
-        await transaction.close_visibility(scope.key, current.document_uid, seq)
-        await transaction.set_document_objects_state(
-            scope.key, current.document_uid, ObjectState.DELETED
+        uids = [current.document_uid for current in documents]
+        await transaction.close_visibility_many(scope.key, uids, seq)
+        await transaction.set_documents_objects_state(
+            scope.key, dict.fromkeys(uids), ObjectState.DELETED
         )
-        if self._graph is not None:
-            affected = await transaction.replace_contributions(scope.key, current.document_uid, [])
-            await self.refresh_aggregates(transaction, scope, affected)
-        await transaction.set_document_coverage_state(
-            scope.key, current.document_uid, CoverageState.PENDING, target_version=current.version
+        # Contributions are retracted even when the graph channel is off, so aggregates never
+        # keep a deleted document as support and purge can erase the orphans. Aggregates are
+        # recomputed from all remaining contributions, so one refresh after every retraction
+        # equals one refresh per document.
+        affected = await transaction.retract_contributions(scope.key, uids)
+        await self.refresh_aggregates(transaction, scope, affected)
+        await transaction.set_documents_coverage_state(
+            scope.key,
+            {current.document_uid: current.version for current in documents},
+            CoverageState.PENDING,
         )
-        return "deleted"
+        return changes
+
+
+_REPRESENTATION: TypeAdapter[Representation] = TypeAdapter(Representation)
+
+
+def _stored_document(
+    record: DocumentRecord, snapshots: Sequence[RepresentationSnapshot]
+) -> DocumentInput:
+    """Rebuild the document input of a stored version from its representation snapshots.
+
+    Snapshots are ordered by ``representation_id``, so with several representations of
+    one kind the first by id feeds its channel.
+    """
+    return DocumentInput.model_validate(
+        {
+            "_id": record.document_id,
+            "metadata": record.metadata,
+            "representations": [
+                _REPRESENTATION.validate_python(snapshot.payload) for snapshot in snapshots
+            ],
+        }
+    )
 
 
 __all__ = ["GraphDerivation", "IngestionService", "document_uid"]

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 from abc import abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, Self
@@ -22,6 +23,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy.exc import SQLAlchemyError
 
 from retrievalloom._logging import get_logger
+from retrievalloom.domain.hashing import random_id, sha256_digest
 from retrievalloom.domain.inputs import Scope
 from retrievalloom.domain.records import (
     CoverageRecord,
@@ -53,9 +55,11 @@ from retrievalloom.errors import (
 from retrievalloom.storage import schema as t
 from retrievalloom.storage.base import (
     DocumentMetadataStoreABC,
+    KeywordDictionaryState,
     MetadataTransactionABC,
     MigrationPolicy,
     PointerRow,
+    PurgeLogEntry,
     StoredRefreshState,
     UnitKey,
 )
@@ -76,6 +80,8 @@ _log = get_logger("storage.sql")
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 VERSION_TABLE = "rl_alembic_version"
 _GRAPH_KINDS = frozenset({ObjectKind.GRAPH_ENTITY, ObjectKind.GRAPH_RELATIONSHIP})
+# Values per `IN` list: far below the bound-parameter limits of SQLite and asyncpg.
+_CHUNK = 500
 
 
 def alembic_config(connection: Connection | None = None) -> Config:
@@ -266,6 +272,9 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         self._write = write
         self._connection: AsyncConnection | None = None
         self._lock: asyncio.Lock | None = None
+        # Scope keys whose snapshot token this transaction replaces on commit; ``None``
+        # in the set stands for every scope.
+        self._touched: set[str | None] = set()
 
     @property
     def scope(self) -> Scope | None:
@@ -317,6 +326,7 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
                 try:
                     if exc_type is None:
                         try:
+                            await self._replace_snapshot_tokens(connection)
                             await _settled(connection.commit())
                         except (SQLAlchemyError, OSError) as error:
                             self._store._reraise(error)
@@ -332,6 +342,21 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         if lock is not None:
             self._lock = None
             lock.release()
+
+    def _touch(self, scope_key: str | None) -> None:
+        """Replace the snapshot token of ``scope_key`` (``None``: every scope) on commit."""
+        self._touched.add(scope_key)
+
+    async def _replace_snapshot_tokens(self, connection: AsyncConnection) -> None:
+        if not self._touched:
+            return
+        table = t.scopes
+        statement = sa.update(table).values(snapshot_token=random_id("snap"))
+        if None not in self._touched:
+            keys = sorted(key for key in self._touched if key is not None)
+            statement = statement.where(table.c.scope_key.in_(keys))
+        self._touched.clear()
+        await _settled(connection.execute(statement))
 
     @property
     def _conn(self) -> AsyncConnection:
@@ -447,6 +472,18 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         ).scalar()
         return int(value or 0)
 
+    async def snapshot_marker(self, scope_key: str) -> tuple[int, str | None]:
+        """Current commit sequence and snapshot token of ``scope_key`` in one statement."""
+        self._guard(scope_key)
+        seq = sa.select(t.commit_seq.c.seq).where(t.commit_seq.c.id == 1).scalar_subquery()
+        token = (
+            sa.select(t.scopes.c.snapshot_token)
+            .where(t.scopes.c.scope_key == scope_key)
+            .scalar_subquery()
+        )
+        row = (await self._exec(sa.select(seq, token))).one()
+        return int(row[0] or 0), row[1]
+
     # documents --------------------------------------------------------------------
     def _document(self, row: Any, scope: Scope) -> DocumentRecord:
         return DocumentRecord(
@@ -494,7 +531,7 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
             return {}
         scope = await self._scope_of(scope_key)
         result: dict[str, DocumentRecord] = {}
-        for chunk in _chunks(sorted(set(document_uids))):
+        for chunk in itertools.batched(sorted(set(document_uids)), _CHUNK):
             # ``document_uid`` is unique, so filtering the scope here keeps SQLite on the
             # uid index instead of scanning the scope.
             rows = (
@@ -507,13 +544,34 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
                     result[row.document_uid] = self._document(row, scope)
         return result
 
+    async def get_change_seqs(
+        self, scope_key: str, document_uids: Sequence[str]
+    ) -> Mapping[str, int]:
+        """``change_seq`` of existing documents by uid."""
+        self._guard(scope_key)
+        result: dict[str, int] = {}
+        for chunk in itertools.batched(sorted(set(document_uids)), _CHUNK):
+            rows = (
+                await self._exec(
+                    sa.select(
+                        t.documents.c.document_uid,
+                        t.documents.c.scope_key,
+                        t.documents.c.change_seq,
+                    ).where(t.documents.c.document_uid.in_(chunk))
+                )
+            ).all()
+            result.update(
+                {row.document_uid: row.change_seq for row in rows if row.scope_key == scope_key}
+            )
+        return result
+
     async def get_documents(
         self, scope: Scope, document_ids: Sequence[str]
     ) -> Mapping[str, DocumentRecord]:
         """Load documents by key."""
         self._guard(scope.key)
         result: dict[str, DocumentRecord] = {}
-        for chunk in _chunks(sorted(set(document_ids))):
+        for chunk in itertools.batched(sorted(set(document_ids)), _CHUNK):
             rows = (
                 await self._exec(
                     sa.select(t.documents).where(
@@ -535,6 +593,8 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         for record, _ in entries:
             self._guard(record.scope.key)
         self._require_write()
+        for record, _ in entries:
+            self._touch(record.scope.key)
         inserts = [_document_values(record) for record, expected in entries if expected is None]
         updates = [(record, expected) for record, expected in entries if expected is not None]
         await self._exec_many(
@@ -558,7 +618,7 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         for record, _ in updates:
             by_scope.setdefault(record.scope.key, set()).add(record.document_id)
         for scope_key, document_ids in by_scope.items():
-            for chunk in _chunks(sorted(document_ids)):
+            for chunk in itertools.batched(sorted(document_ids), _CHUNK):
                 rows = (
                     await self._exec(
                         sa.select(table.c.document_id, table.c.row_revision).where(
@@ -634,6 +694,38 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
             query = query.where(columns.document_id > after_id)
         rows = (await self._exec(query.order_by(columns.document_id).limit(limit))).all()
         return [(row.document_id, row.metadata) for row in rows]
+
+    async def list_changed_documents(
+        self, scope_key: str, *, after_seq: int, limit: int = 1000
+    ) -> Sequence[DocumentRecord]:
+        """Documents changed after ``after_seq``, never splitting a ``change_seq``."""
+        self._guard(scope_key)
+        scope = await self._scope_of(scope_key)
+        documents = t.documents
+        in_scope = documents.c.scope_key == scope_key
+        # Ordering by ``change_seq`` alone keeps both queries on the change index.
+        rows = list(
+            (
+                await self._exec(
+                    sa.select(documents)
+                    .where(in_scope, documents.c.change_seq > after_seq)
+                    .order_by(documents.c.change_seq)
+                    .limit(limit)
+                )
+            ).all()
+        )
+        if rows and len(rows) == limit:
+            last = rows[-1].change_seq
+            rows = [row for row in rows if row.change_seq < last]
+            rows.extend(
+                (
+                    await self._exec(
+                        sa.select(documents).where(in_scope, documents.c.change_seq == last)
+                    )
+                ).all()
+            )
+        rows.sort(key=lambda row: (row.change_seq, row.document_uid))
+        return [self._document(row, scope) for row in rows]
 
     async def count_documents(self, scope_key: str) -> Mapping[str, int]:
         """Count documents per state."""
@@ -791,7 +883,7 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         self._guard(scope_key)
         events = t.ingestion_events
         result: dict[str, IngestionEvent] = {}
-        for chunk in _chunks(sorted(set(event_ids))):
+        for chunk in itertools.batched(sorted(set(event_ids)), _CHUNK):
             rows = (
                 await self._exec(
                     sa.select(events).where(
@@ -836,7 +928,7 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         self._guard(scope_key)
         events = t.ingestion_events
         found: dict[str, Any] = {}
-        for chunk in _chunks(sorted(probes)):
+        for chunk in itertools.batched(sorted(probes), _CHUNK):
             rows = (
                 await self._exec(
                     sa.select(events)
@@ -913,7 +1005,7 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
             self._guard(item.scope.key)
             rows[item.object_id] = _object_values(item)
         existing: dict[str, str] = {}
-        for chunk in _chunks(sorted(rows)):
+        for chunk in itertools.batched(sorted(rows), _CHUNK):
             found = (
                 await self._exec(
                     sa.select(t.objects.c.object_id, t.objects.c.scope_key).where(
@@ -943,7 +1035,7 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         """Load objects of one scope by id."""
         self._guard(scope_key)
         result: dict[str, DerivedObject] = {}
-        for chunk in _chunks(sorted(set(object_ids))):
+        for chunk in itertools.batched(sorted(set(object_ids)), _CHUNK):
             rows = (
                 await self._exec(
                     sa.select(t.objects).where(
@@ -993,7 +1085,7 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         # and scan every object of that kind.
         kept = None if kinds is None else {kind.value for kind in kinds}
         for uids, pinned in ((any_version, False), (versioned, True)):
-            for chunk in _chunks(uids):
+            for chunk in itertools.batched(uids, _CHUNK):
                 query = sa.select(objects).where(
                     objects.c.scope_key == scope_key, objects.c.document_uid.in_(chunk)
                 )
@@ -1063,6 +1155,35 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         result = await self._exec(statement.values(state=state.value))
         return int(result.rowcount)
 
+    async def set_documents_objects_state(
+        self, scope_key: str, targets: Mapping[str, int | None], state: ObjectState
+    ) -> None:
+        """Change object states of many documents in batched statements."""
+        self._guard(scope_key)
+        self._require_write()
+        objects = t.objects
+        every = sorted(uid for uid, exclude in targets.items() if exclude is None)
+        for chunk in itertools.batched(every, _CHUNK):
+            await self._exec(
+                sa.update(objects)
+                .where(objects.c.scope_key == scope_key, objects.c.document_uid.in_(chunk))
+                .values(state=state.value)
+            )
+        await self._exec_many(
+            sa.update(objects)
+            .where(
+                objects.c.scope_key == scope_key,
+                objects.c.document_uid == sa.bindparam("b_uid"),
+                objects.c.version != sa.bindparam("b_version"),
+            )
+            .values(state=state.value),
+            [
+                {"b_uid": uid, "b_version": exclude}
+                for uid, exclude in sorted(targets.items())
+                if exclude is not None
+            ],
+        )
+
     async def replace_contributions(
         self,
         scope_key: str,
@@ -1104,6 +1225,24 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         affected.update(contribution.object_id for contribution in contributions)
         return sorted(affected)
 
+    async def retract_contributions(
+        self, scope_key: str, document_uids: Sequence[str]
+    ) -> Sequence[str]:
+        """Delete every contribution of many documents."""
+        self._guard(scope_key)
+        self._require_write()
+        table = t.object_contributions
+        affected: set[str] = set()
+        for chunk in itertools.batched(sorted(set(document_uids)), _CHUNK):
+            in_chunk = sa.and_(table.c.scope_key == scope_key, table.c.document_uid.in_(chunk))
+            affected.update(
+                (await self._exec(sa.select(table.c.object_id).where(in_chunk).distinct()))
+                .scalars()
+                .all()
+            )
+            await self._exec(sa.delete(table).where(in_chunk))
+        return sorted(affected)
+
     async def get_contributions(
         self, scope_key: str, object_ids: Sequence[str]
     ) -> Sequence[ObjectContribution]:
@@ -1111,7 +1250,7 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         self._guard(scope_key)
         table = t.object_contributions
         result: list[ObjectContribution] = []
-        for chunk in _chunks(sorted(set(object_ids))):
+        for chunk in itertools.batched(sorted(set(object_ids)), _CHUNK):
             rows = (
                 await self._exec(
                     sa.select(table)
@@ -1180,6 +1319,28 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
             for row in rows
         ]
 
+    async def get_lineage_many(
+        self, scope_key: str, object_ids: Sequence[str]
+    ) -> Sequence[LineageEdge]:
+        """Edges touching any of ``object_ids``."""
+        self._guard(scope_key)
+        lineage = t.lineage
+        found: dict[tuple[str, str, str], LineageEdge] = {}
+        for chunk in itertools.batched(sorted(set(object_ids)), _CHUNK):
+            rows = (
+                await self._exec(
+                    sa.select(lineage.c.from_id, lineage.c.to_id, lineage.c.relation).where(
+                        lineage.c.scope_key == scope_key,
+                        sa.or_(lineage.c.from_id.in_(chunk), lineage.c.to_id.in_(chunk)),
+                    )
+                )
+            ).all()
+            for from_id, to_id, relation in rows:
+                found[(from_id, to_id, relation)] = LineageEdge(
+                    scope_key=scope_key, from_id=from_id, to_id=to_id, relation=relation
+                )
+        return [found[key] for key in sorted(found)]
+
     # visibility -------------------------------------------------------------------
     def _unit_filter(self, table: sa.Table, unit: UnitKey) -> Any:
         return sa.and_(
@@ -1222,7 +1383,7 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         )
         open_now: set[str] = set()
         empty: set[str] = set()
-        for chunk in _chunks(sorted(targets)):
+        for chunk in itertools.batched(sorted(targets), _CHUNK):
             rows = (
                 await self._exec(
                     sa.select(
@@ -1284,6 +1445,24 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
             .values(visible_until_seq=seq)
         )
 
+    async def close_visibility_many(
+        self, scope_key: str, document_uids: Sequence[str], seq: int
+    ) -> None:
+        """Close every open window of many documents."""
+        self._guard(scope_key)
+        self._require_write()
+        table = t.visibility
+        for chunk in itertools.batched(sorted(set(document_uids)), _CHUNK):
+            await self._exec(
+                sa.update(table)
+                .where(
+                    table.c.scope_key == scope_key,
+                    table.c.document_uid.in_(chunk),
+                    table.c.visible_until_seq.is_(None),
+                )
+                .values(visible_until_seq=seq)
+            )
+
     async def visible_versions(
         self, unit: UnitKey, document_uids: Sequence[str], seq: int
     ) -> Mapping[str, frozenset[int]]:
@@ -1291,7 +1470,7 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         self._guard(unit.scope_key)
         table = t.visibility
         found: dict[str, set[int]] = {}
-        for chunk in _chunks(sorted(set(document_uids))):
+        for chunk in itertools.batched(sorted(set(document_uids)), _CHUNK):
             rows = (
                 await self._exec(
                     sa.select(table.c.document_uid, table.c.version).where(
@@ -1338,6 +1517,7 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         rows: list[dict[str, Any]] = []
         for record in records:
             self._guard(record.scope_key)
+            self._touch(record.scope_key)
             rows.append(
                 {
                     "scope_key": record.scope_key,
@@ -1386,7 +1566,7 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         self._guard(unit.scope_key)
         table = t.coverage
         result: dict[str, CoverageRecord] = {}
-        for chunk in _chunks(sorted(set(document_uids))):
+        for chunk in itertools.batched(sorted(set(document_uids)), _CHUNK):
             rows = (
                 await self._exec(
                     sa.select(table).where(
@@ -1404,16 +1584,19 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         states: Sequence[CoverageState],
         *,
         limit: int = 1000,
+        after_document_uid: str | None = None,
     ) -> Sequence[CoverageRecord]:
         """Coverage rows in the given states."""
         self._guard(unit.scope_key)
         table = t.coverage
+        after = () if after_document_uid is None else (table.c.document_uid > after_document_uid,)
         rows = (
             await self._exec(
                 sa.select(table)
                 .where(
                     self._unit_filter(table, unit),
                     table.c.state.in_([state.value for state in states]),
+                    *after,
                 )
                 # Same order as ``document_uid``, but keeps SQLite from walking the primary
                 # key over the whole scope to avoid a sort instead of using the state index.
@@ -1423,31 +1606,32 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         ).all()
         return [self._coverage(row) for row in rows]
 
-    async def documents_missing_coverage(
-        self, unit: UnitKey, *, limit: int = 1000
-    ) -> Sequence[DocumentRecord]:
-        """Active documents without coverage for ``unit``."""
+    async def get_coverage_watermark(self, unit: UnitKey) -> int | None:
+        """Coverage watermark of ``unit``."""
         self._guard(unit.scope_key)
-        scope = await self._scope_of(unit.scope_key)
-        documents = t.documents
-        coverage = t.coverage
-        covered = sa.exists().where(
-            self._unit_filter(coverage, unit),
-            coverage.c.document_uid == documents.c.document_uid,
+        table = t.coverage_watermarks
+        return (
+            await self._exec(sa.select(table.c.change_seq).where(self._unit_filter(table, unit)))
+        ).scalar()
+
+    async def set_coverage_watermark(self, unit: UnitKey, change_seq: int) -> None:
+        """Set the coverage watermark of ``unit``."""
+        self._guard(unit.scope_key)
+        self._require_write()
+        table = t.coverage_watermarks
+        statement = self._store._insert(table).values(
+            scope_key=unit.scope_key,
+            channel=unit.channel,
+            method=unit.method,
+            instance=unit.instance,
+            change_seq=change_seq,
         )
-        rows = (
-            await self._exec(
-                sa.select(documents)
-                .where(
-                    documents.c.scope_key == unit.scope_key,
-                    documents.c.state == DocumentState.ACTIVE.value,
-                    ~covered,
-                )
-                .order_by(documents.c.document_uid)
-                .limit(limit)
+        await self._exec(
+            statement.on_conflict_do_update(
+                index_elements=[column.name for column in table.primary_key.columns],
+                set_={"change_seq": statement.excluded.change_seq},
             )
-        ).all()
-        return [self._document(row, scope) for row in rows]
+        )
 
     async def coverage_counts(
         self, scope_key: str, instances: Sequence[str]
@@ -1479,6 +1663,8 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         """Set every coverage row of many documents."""
         self._guard(scope_key)
         self._require_write()
+        if targets:
+            self._touch(scope_key)
         table = t.coverage
         await self._exec_many(
             sa.update(table)
@@ -1490,6 +1676,148 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
             ),
             [{"b_uid": uid, "b_target": target} for uid, target in targets.items()],
         )
+
+    # keyword dictionaries ---------------------------------------------------------
+    def _dictionary_filter(self, table: sa.Table, scope_key: str, dictionary_id: str) -> Any:
+        return sa.and_(table.c.scope_key == scope_key, table.c.dictionary_id == dictionary_id)
+
+    async def list_keyword_dictionaries(self, scope_key: str) -> Sequence[KeywordDictionaryState]:
+        """Keyword dictionaries of a scope."""
+        self._guard(scope_key)
+        table = t.keyword_dictionaries
+        rows = (
+            await self._exec(
+                sa.select(table)
+                .where(table.c.scope_key == scope_key)
+                .order_by(table.c.dictionary_id)
+            )
+        ).all()
+        return [
+            KeywordDictionaryState(
+                dictionary_id=row.dictionary_id, fields=tuple(row.fields), revision=row.revision
+            )
+            for row in rows
+        ]
+
+    async def create_keyword_dictionary(
+        self,
+        scope_key: str,
+        dictionary_id: str,
+        fields: Sequence[str],
+        terms: Mapping[str, int],
+    ) -> None:
+        """Register a dictionary with its term counts."""
+        self._guard(scope_key)
+        self._require_write()
+        table = t.keyword_dictionaries
+        found = (
+            await self._exec(
+                sa.select(table.c.revision).where(
+                    self._dictionary_filter(table, scope_key, dictionary_id)
+                )
+            )
+        ).first()
+        if found is not None:
+            raise VersionConflictError(
+                "keyword dictionary already exists", details={"dictionary_id": dictionary_id}
+            )
+        await self._exec(
+            sa.insert(table).values(
+                scope_key=scope_key, dictionary_id=dictionary_id, fields=list(fields), revision=1
+            )
+        )
+        await self._exec_many(
+            sa.insert(t.keyword_terms),
+            [
+                {
+                    "scope_key": scope_key,
+                    "dictionary_id": dictionary_id,
+                    "term_hash": sha256_digest(term),
+                    "term": term,
+                    "documents": count,
+                }
+                for term, count in terms.items()
+                if count > 0
+            ],
+        )
+
+    async def adjust_keyword_terms(
+        self, scope_key: str, dictionary_id: str, deltas: Mapping[str, int]
+    ) -> None:
+        """Apply document-count deltas to terms; bump the revision on added or removed terms."""
+        self._guard(scope_key)
+        self._require_write()
+        hashes = {sha256_digest(term): term for term, delta in deltas.items() if delta}
+        dictionaries = t.keyword_dictionaries
+        known = (
+            await self._exec(
+                sa.select(dictionaries.c.revision).where(
+                    self._dictionary_filter(dictionaries, scope_key, dictionary_id)
+                )
+            )
+        ).first()
+        if not hashes or known is None:
+            return
+        table = t.keyword_terms
+        in_dictionary = self._dictionary_filter(table, scope_key, dictionary_id)
+        current: dict[str, int] = {}
+        for chunk in itertools.batched(sorted(hashes), _CHUNK):
+            rows = (
+                await self._exec(
+                    sa.select(table.c.term_hash, table.c.documents).where(
+                        in_dictionary, table.c.term_hash.in_(chunk)
+                    )
+                )
+            ).all()
+            current.update({row.term_hash: row.documents for row in rows})
+        inserts: list[dict[str, Any]] = []
+        updates: list[dict[str, Any]] = []
+        removed: list[str] = []
+        for term_hash, term in hashes.items():
+            count = current.get(term_hash, 0) + deltas[term]
+            if count <= 0:
+                if term_hash in current:
+                    removed.append(term_hash)
+            elif term_hash in current:
+                updates.append({"b_hash": term_hash, "b_documents": count})
+            else:
+                inserts.append(
+                    {
+                        "scope_key": scope_key,
+                        "dictionary_id": dictionary_id,
+                        "term_hash": term_hash,
+                        "term": term,
+                        "documents": count,
+                    }
+                )
+        await self._exec_many(sa.insert(table), inserts)
+        await self._exec_many(
+            sa.update(table)
+            .where(in_dictionary, table.c.term_hash == sa.bindparam("b_hash"))
+            .values(documents=sa.bindparam("b_documents")),
+            updates,
+        )
+        for chunk in itertools.batched(removed, _CHUNK):
+            await self._exec(sa.delete(table).where(in_dictionary, table.c.term_hash.in_(chunk)))
+        if inserts or removed:
+            await self._exec(
+                sa.update(dictionaries)
+                .where(self._dictionary_filter(dictionaries, scope_key, dictionary_id))
+                .values(revision=dictionaries.c.revision + 1)
+            )
+
+    async def list_keyword_terms(self, scope_key: str, dictionary_id: str) -> Sequence[str]:
+        """Terms of a dictionary."""
+        self._guard(scope_key)
+        table = t.keyword_terms
+        terms = (
+            await self._exec(
+                sa.select(table.c.term).where(
+                    self._dictionary_filter(table, scope_key, dictionary_id)
+                )
+            )
+        ).scalars()
+        return sorted(terms)
 
     # generations and pointers -----------------------------------------------------
     @staticmethod
@@ -1545,6 +1873,7 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
             values,
             expected_revision,
         )
+        self._touch(generation.scope_key)
 
     async def get_generation(self, generation_id: str) -> IndexGeneration | None:
         """Load a generation."""
@@ -1608,6 +1937,7 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         }
         values = {**keys, "active_generation_id": generation_id}
         await self._cas(t.generation_pointers, keys, values, expected_revision)
+        self._touch(unit.scope_key)
 
     async def list_pointers(self, scope_key: str, instances: Sequence[str]) -> Sequence[PointerRow]:
         """Pointers of a scope."""
@@ -1794,7 +2124,8 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         self._require_write()
         if not instance_id:
             raise ValueError("the shared (durable) instance cannot be purged")
-        for table in (t.coverage, t.visibility, t.generation_pointers):
+        self._touch(None)
+        for table in (t.coverage, t.coverage_watermarks, t.visibility, t.generation_pointers):
             await self._exec(sa.delete(table).where(table.c.instance == instance_id))
         await self._exec(
             sa.delete(t.generations).where(t.generations.c.backend_instance_id == instance_id)
@@ -1808,17 +2139,36 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
 
     # erasure and retention --------------------------------------------------------
     async def list_purgeable_documents(
-        self, scope_key: str, *, deleted_before: datetime, limit: int = 1000
+        self,
+        scope_key: str,
+        *,
+        deleted_before: datetime,
+        limit: int = 1000,
+        methods: Sequence[tuple[str, str]] | None = None,
     ) -> Sequence[DocumentRecord]:
         """Tombstoned documents whose coverage is fully deleted."""
         self._guard(scope_key)
         scope = await self._scope_of(scope_key)
         documents = t.documents
         coverage = t.coverage
+        configured = (
+            ()
+            if methods is None
+            else (
+                sa.or_(
+                    sa.false(),
+                    *(
+                        sa.and_(coverage.c.channel == channel, coverage.c.method == method)
+                        for channel, method in methods
+                    ),
+                ),
+            )
+        )
         pending = sa.exists().where(
             coverage.c.scope_key == documents.c.scope_key,
             coverage.c.document_uid == documents.c.document_uid,
             coverage.c.state != CoverageState.DELETED.value,
+            *configured,
         )
         rows = (
             await self._exec(
@@ -1835,46 +2185,66 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         ).all()
         return [self._document(row, scope) for row in rows]
 
-    async def purge_document(
-        self, scope_key: str, document_uid: str, *, object_ids: Sequence[str] = ()
+    async def purge_documents(
+        self,
+        scope_key: str,
+        documents: Mapping[str, Sequence[str]],
+        *,
+        purged_at: datetime,
     ) -> int:
-        """Physically delete a tombstoned document and everything derived from it."""
+        """Physically delete tombstoned documents and everything derived from them."""
         self._guard(scope_key)
         self._require_write()
-        state = (
-            await self._exec(
-                sa.select(t.documents.c.state).where(
-                    t.documents.c.scope_key == scope_key,
-                    t.documents.c.document_uid == document_uid,
+        uids = sorted(documents)
+        if not uids:
+            return 0
+        self._touch(scope_key)
+        table = t.documents
+        present: list[str] = []
+        for chunk in itertools.batched(uids, _CHUNK):
+            # ``document_uid`` is unique: filtering the scope in SQL would make SQLite scan it.
+            rows = (
+                await self._exec(
+                    sa.select(table.c.scope_key, table.c.document_uid, table.c.state).where(
+                        table.c.document_uid.in_(chunk)
+                    )
                 )
-            )
-        ).scalar()
-        if state is not None and state != DocumentState.DELETED.value:
-            raise LifecycleError(
-                "only deleted documents can be purged",
-                details={"document_uid": document_uid, "state": state},
-            )
+            ).all()
+            for row_scope, document_uid, state in rows:
+                if row_scope != scope_key:
+                    continue
+                if state != DocumentState.DELETED.value:
+                    raise LifecycleError(
+                        "only deleted documents can be purged",
+                        details={"document_uid": document_uid, "state": state},
+                    )
+                present.append(document_uid)
         objects = t.objects
-        owned = (
-            await self._exec(
-                sa.select(objects.c.object_id).where(
-                    objects.c.scope_key == scope_key, objects.c.document_uid == document_uid
+        removed: dict[str, set[str]] = {uid: set(documents[uid]) for uid in uids}
+        for chunk in itertools.batched(uids, _CHUNK):
+            rows = (
+                await self._exec(
+                    sa.select(objects.c.object_id, objects.c.document_uid).where(
+                        objects.c.scope_key == scope_key, objects.c.document_uid.in_(chunk)
+                    )
                 )
-            )
-        ).scalars()
-        removed = sorted({*owned, *object_ids})
+            ).all()
+            for object_id, document_uid in rows:
+                removed[document_uid].add(object_id)
+        object_ids = sorted({object_id for ids in removed.values() for object_id in ids})
         deleted = 0
         lineage = t.lineage
-        deleted += await self._delete(
-            lineage,
-            sa.or_(lineage.c.from_id == document_uid, lineage.c.to_id == document_uid),
-            scope_key,
-        )
         contributions = t.object_contributions
-        deleted += await self._delete(
-            contributions, contributions.c.document_uid == document_uid, scope_key
-        )
-        for chunk in _chunks(removed):
+        for chunk in itertools.batched(uids, _CHUNK):
+            deleted += await self._delete(
+                lineage,
+                sa.or_(lineage.c.from_id.in_(chunk), lineage.c.to_id.in_(chunk)),
+                scope_key,
+            )
+            deleted += await self._delete(
+                contributions, contributions.c.document_uid.in_(chunk), scope_key
+            )
+        for chunk in itertools.batched(object_ids, _CHUNK):
             deleted += await self._delete(
                 lineage,
                 sa.or_(lineage.c.from_id.in_(chunk), lineage.c.to_id.in_(chunk)),
@@ -1884,20 +2254,98 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
                 contributions, contributions.c.object_id.in_(chunk), scope_key
             )
             deleted += await self._delete(objects, objects.c.object_id.in_(chunk), scope_key)
-        for table in (
-            t.visibility,
-            t.coverage,
-            t.ingestion_events,
-            t.representations,
-            t.document_versions,
-            t.documents,
-        ):
-            deleted += await self._delete(table, table.c.document_uid == document_uid, scope_key)
+        for chunk in itertools.batched(uids, _CHUNK):
+            for history in (
+                t.visibility,
+                t.coverage,
+                t.ingestion_events,
+                t.representations,
+                t.document_versions,
+                t.documents,
+            ):
+                deleted += await self._delete(history, history.c.document_uid.in_(chunk), scope_key)
+        if present:
+            log = t.purge_log
+            head = (
+                await self._exec(
+                    sa.select(sa.func.max(log.c.seq)).where(log.c.scope_key == scope_key)
+                )
+            ).scalar()
+            first = int(head or 0) + 1
+            await self._exec_many(
+                sa.insert(log),
+                [
+                    {
+                        "scope_key": scope_key,
+                        "seq": first + offset,
+                        "document_uid": document_uid,
+                        "object_ids": sorted(removed[document_uid]),
+                        "purged_at": purged_at,
+                    }
+                    for offset, document_uid in enumerate(sorted(present))
+                ],
+            )
         return deleted
 
     async def _delete(self, table: sa.Table, condition: Any, scope_key: str) -> int:
         result = await self._exec(sa.delete(table).where(table.c.scope_key == scope_key, condition))
         return int(result.rowcount)
+
+    async def purge_log_heads(self) -> Mapping[str, int]:
+        """Newest purge-log sequence per scope."""
+        log = t.purge_log
+        query = sa.select(log.c.scope_key, sa.func.max(log.c.seq)).group_by(log.c.scope_key)
+        if self._scope is not None:
+            query = query.where(log.c.scope_key == self._scope.key)
+        return {scope_key: int(seq) for scope_key, seq in (await self._exec(query)).all()}
+
+    async def list_purge_log(
+        self, scope_key: str, *, after_seq: int, limit: int = 1000
+    ) -> Sequence[PurgeLogEntry]:
+        """Purge-log entries after ``after_seq``."""
+        self._guard(scope_key)
+        log = t.purge_log
+        rows = (
+            await self._exec(
+                sa.select(log)
+                .where(log.c.scope_key == scope_key, log.c.seq > after_seq)
+                .order_by(log.c.seq)
+                .limit(limit)
+            )
+        ).all()
+        return [
+            PurgeLogEntry(
+                scope_key=row.scope_key,
+                seq=row.seq,
+                document_uid=row.document_uid,
+                object_ids=tuple(row.object_ids),
+                purged_at=row.purged_at,
+            )
+            for row in rows
+        ]
+
+    async def prune_purge_log(self, scope_key: str, *, before: datetime, limit: int = 1000) -> int:
+        """Delete old purge-log entries, always keeping the newest one."""
+        self._guard(scope_key)
+        self._require_write()
+        log = t.purge_log
+        newest = sa.select(sa.func.max(log.c.seq)).where(log.c.scope_key == scope_key)
+        expired = (
+            await self._exec(
+                sa.select(log.c.seq)
+                .where(
+                    log.c.scope_key == scope_key,
+                    log.c.purged_at < before,
+                    log.c.seq < newest.scalar_subquery(),
+                )
+                .order_by(log.c.seq)
+                .limit(limit)
+            )
+        ).scalars()
+        seqs = list(expired)
+        for chunk in itertools.batched(seqs, _CHUNK):
+            await self._delete(log, log.c.seq.in_(chunk), scope_key)
+        return len(seqs)
 
     async def prune_versions(self, scope_key: str, *, keep: int, limit: int = 1000) -> int:
         """Delete version history beyond the ``keep`` newest unprotected versions."""
@@ -1963,6 +2411,12 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
             generations.c.generation_id == coverage.c.generation_id,
             generations.c.state.in_([GenerationState.ACTIVE.value, GenerationState.RETIRING.value]),
         )
+        events = t.ingestion_events
+        logged = sa.exists().where(
+            events.c.scope_key == scope_key,
+            events.c.document_uid == uid,
+            events.c.version_after == number,
+        )
         rows = (
             await self._exec(
                 sa.select(uid, number)
@@ -1973,6 +2427,7 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
                     ~live_contribution,
                     ~open_window,
                     ~indexed,
+                    ~logged,
                 )
                 .order_by(uid, number)
                 .limit(limit)
@@ -2005,7 +2460,7 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
             )
         ).scalars()
         ids = list(expired)
-        for chunk in _chunks(ids):
+        for chunk in itertools.batched(ids, _CHUNK):
             await self._delete(events, events.c.event_id.in_(chunk), scope_key)
         return len(ids)
 
@@ -2030,7 +2485,7 @@ class SQLAlchemyTransaction(MetadataTransactionABC):
         self._require_write()
         table = t.refresh_state
         ids = [*deletes, *(item.resource_id for item in puts)]
-        for chunk in _chunks(ids):
+        for chunk in itertools.batched(ids, _CHUNK):
             await self._exec(
                 sa.delete(table).where(
                     table.c.namespace == namespace, table.c.resource_id.in_(chunk)
@@ -2053,10 +2508,6 @@ def _contribution(row: Any) -> ObjectContribution:
         ordinal=row.ordinal,
         value=row.value,
     )
-
-
-def _chunks[T](values: Sequence[T], size: int = 500) -> list[Sequence[T]]:
-    return [values[index : index + size] for index in range(0, len(values), size)]
 
 
 def _document_values(record: DocumentRecord) -> dict[str, Any]:

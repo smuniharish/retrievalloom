@@ -1,4 +1,8 @@
-# Security Policy
+# Security policy
+
+Thank you for helping keep RetrievalLoom and its users safe. This policy
+explains which versions receive fixes and how to report a vulnerability
+privately.
 
 ## Supported versions
 
@@ -15,15 +19,15 @@ samamuniharish@gmail.com. Include a clear description, affected versions,
 reproduction steps, potential impact, and any suggested mitigation. Do not
 include credentials or sensitive production data.
 
-We will acknowledge a report, assess impact, and coordinate disclosure with the
-reporter when possible. Please do not publish details until a fix or mitigation
-is available.
+You will receive an acknowledgment, an assessment of the impact, and
+coordination on disclosure where possible. Please do not publish details until
+a fix or mitigation is available.
 
 ## Deployment guidance
 
-RetrievalLoom stores application documents, derived chunks, graph data, and
-retrieval provenance in the metadata store and index backends you configure.
-Deployers are responsible for:
+RetrievalLoom stores your documents, their chunks, graph data and retrieval
+provenance in the metadata store and index backends you configure. As the
+deployer, you are responsible for:
 
 - deriving `Scope` values (tenant, namespace) from authenticated identity, never
   from untrusted request input, and installing an access policy where finer
@@ -41,5 +45,5 @@ what it leaves to the deployment.
 
 ## Security changes
 
-Contributors should document security-relevant changes to tenant isolation,
+When you contribute, document security-relevant changes to tenant isolation,
 stored data, logging, and failure modes, and add focused tests.

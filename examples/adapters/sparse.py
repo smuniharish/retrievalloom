@@ -3,12 +3,10 @@
 ``SparseIndexABC`` is the engine's lexical slot (``index.sparse``), so a learned-sparse
 model replaces BM25 without engine changes: ``Components(sparse_index=BgeM3SparseIndex(...))``.
 
-Contract fit: ``SparseQuery`` carries the *engine tokenizer's* tokens, not the raw query.
-The index therefore encodes ``" ".join(query.tokens)``; with the default
-``SimpleTokenizer`` that is the casefolded query without punctuation, which bge-m3 handles
-well. Documents are encoded from ``IndexItem.text`` (casefolded the same way), so a
-stemming or stop-word tokenizer would make queries and documents disagree - pair this
-index with ``SimpleTokenizer``.
+Contract fit: ``SparseQuery.text`` carries the raw query, so the index encodes it with
+bge-m3's own tokenizer and ignores the engine tokenizer's ``tokens``. Documents
+(``IndexItem.text``) and queries are casefolded the same way before encoding, so this
+index works with any engine tokenizer, including stemming or stop-word ones.
 """
 
 from __future__ import annotations
@@ -376,7 +374,7 @@ class BgeM3SparseIndex(SparseIndexABC):
         filters: FilterExpression | None,
     ) -> Sequence[RetrievalHit]:
         """Dot product of learned term weights; ``matched`` lists the top shared terms."""
-        text = " ".join(query.tokens).strip()
+        text = (query.text or " ".join(query.tokens)).strip()
         if not text or limit < 1:
             return []
         await self._ensure_collection()

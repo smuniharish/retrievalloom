@@ -28,7 +28,8 @@ from retrievalloom.index.keyword import AhoCorasickKeywordIndex
 from retrievalloom.index.sparse import BM25sIndex
 from retrievalloom.index.vector import QdrantVectorStore
 from retrievalloom.infra.cache import InMemoryLRUCache, NoCache
-from retrievalloom.storage.sqlite import SQLiteMetadataStore
+from retrievalloom.storage.base import MetadataTransactionABC
+from retrievalloom.storage.sqlite import SQLiteMetadataStore, SQLiteTransaction
 from retrievalloom.testing import (
     CacheContract,
     DeduplicatorContract,
@@ -274,3 +275,26 @@ class TestSQLiteMemoryStore(SharedResources, MetadataStoreContract):
 class TestSQLiteFileStore(SharedResources, MetadataStoreContract):
     async def make_component(self, tmp_path: Path) -> SQLiteMetadataStore:
         return SQLiteMetadataStore(tmp_path / "meta.db")
+
+
+class _DefaultsTransaction(SQLiteTransaction):
+    """Falls back to the base-class forms of the optional batched methods."""
+
+    snapshot_marker = MetadataTransactionABC.snapshot_marker
+    get_change_seqs = MetadataTransactionABC.get_change_seqs
+    set_documents_objects_state = MetadataTransactionABC.set_documents_objects_state
+    retract_contributions = MetadataTransactionABC.retract_contributions
+    get_lineage_many = MetadataTransactionABC.get_lineage_many
+    close_visibility_many = MetadataTransactionABC.close_visibility_many
+
+
+class _DefaultsStore(SQLiteMetadataStore):
+    def transaction(self, scope: Scope | None = None, *, write: bool) -> SQLiteTransaction:
+        return _DefaultsTransaction(self, scope, write=write)
+
+
+class TestStoreWithBaseDefaults(SharedResources, MetadataStoreContract):
+    """A store implementing only the abstract methods still passes the contract."""
+
+    async def make_component(self, tmp_path: Path) -> SQLiteMetadataStore:
+        return _DefaultsStore()

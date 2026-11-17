@@ -9,6 +9,7 @@ from pydantic import Field
 
 from retrievalloom.contracts.component import ComponentABC
 from retrievalloom.domain.base import FrozenModel, Metadata, PositiveInt
+from retrievalloom.domain.hashing import digest_json
 from retrievalloom.domain.inputs import GraphEntityInput, GraphRelationshipInput, Scope
 
 if TYPE_CHECKING:
@@ -176,3 +177,12 @@ class KeywordDictionaryABC(ComponentABC):
     @abstractmethod
     async def entries(self, scope: Scope) -> Sequence[KeywordEntry]:
         """Return the dictionary entries for ``scope``."""
+
+    async def revision(self, scope: Scope) -> str:
+        """A token that changes whenever ``entries(scope)`` changes.
+
+        The indexer checks it on every pass to decide whether keyword generations must
+        be rebuilt. The default digests ``entries``; override it with something cheaper
+        when computing the entries reads the whole scope.
+        """
+        return digest_json([entry.model_dump(mode="json") for entry in await self.entries(scope)])

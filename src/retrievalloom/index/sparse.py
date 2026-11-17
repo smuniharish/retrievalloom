@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
+import math
 from array import array
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from bm25s.scoring import _select_idf_scorer, _select_tfc_scorer
 
 from retrievalloom.contracts.component import ComponentInfo, make_info
 from retrievalloom.contracts.indexes import SparseIndexABC
-from retrievalloom.domain.filters import evaluate
 from retrievalloom.domain.records import Channel
 from retrievalloom.domain.retrieval import (
     MethodRef,
@@ -39,6 +38,56 @@ _NONOCCURRENCE_METHODS = frozenset({"bm25l", "bm25+"})
 _DELTA = 0.5
 # Compaction runs once more slots are dead than live, and at least this many.
 _COMPACT_MIN_DEAD = 1024
+
+
+# bm25s's idf and term-frequency formulas (Kamphuis et al., ECIR 2020), restated
+# because bm25s keeps them private. ``test_sparse_scores_match_bm25s`` pins them.
+def _idf_robertson(df: int, n: int) -> float:
+    return math.log(max((n - df + 0.5) / (df + 0.5), 1.0))
+
+
+def _idf_lucene(df: int, n: int) -> float:
+    return math.log(1 + (n - df + 0.5) / (df + 0.5))
+
+
+def _idf_atire(df: int, n: int) -> float:
+    return math.log(n / df)
+
+
+def _idf_bm25l(df: int, n: int) -> float:
+    return math.log((n + 1) / (df + 0.5))
+
+
+def _idf_bm25plus(df: int, n: int) -> float:
+    return math.log((n + 1) / df)
+
+
+def _tfc_robertson(tf: Any, l_d: Any, l_avg: float, k1: float, b: float, delta: float) -> Any:
+    del delta
+    return tf / (k1 * ((1 - b) + b * l_d / l_avg) + tf)
+
+
+def _tfc_atire(tf: Any, l_d: Any, l_avg: float, k1: float, b: float, delta: float) -> Any:
+    del delta
+    return (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * l_d / l_avg))
+
+
+def _tfc_bm25l(tf: Any, l_d: Any, l_avg: float, k1: float, b: float, delta: float) -> Any:
+    c = tf / (1 - b + b * l_d / l_avg)
+    return ((k1 + 1) * (c + delta)) / (k1 + c + delta)
+
+
+def _tfc_bm25plus(tf: Any, l_d: Any, l_avg: float, k1: float, b: float, delta: float) -> Any:
+    return ((k1 + 1) * tf) / (k1 * (1 - b + b * l_d / l_avg) + tf) + delta
+
+
+_FORMULAS = {
+    "robertson": (_idf_robertson, _tfc_robertson),
+    "lucene": (_idf_lucene, _tfc_robertson),
+    "atire": (_idf_atire, _tfc_atire),
+    "bm25l": (_idf_bm25l, _tfc_bm25l),
+    "bm25+": (_idf_bm25plus, _tfc_bm25plus),
+}
 
 type _Posting = tuple[array[int], array[int]]
 type _Analysis = list[tuple[str, int, Counter[str]]]
@@ -151,11 +200,10 @@ class BM25sIndex(SparseIndexABC, InMemoryGenerationalIndex):
         super().__init__()
         if k1 <= 0 or not 0.0 <= b <= 1.0:
             raise ConfigurationError("invalid BM25 parameters")
-        try:
-            self._idf = _select_idf_scorer(method)
-            self._tfc = _select_tfc_scorer(method)
-        except ValueError as exc:
-            raise ConfigurationError(f"unknown BM25 method {method!r}") from exc
+        formulas = _FORMULAS.get(method)
+        if formulas is None:
+            raise ConfigurationError(f"unknown BM25 method {method!r}")
+        self._idf, self._tfc = formulas
         self._k1 = k1
         self._b = b
         self._nonoccurrence = method in _NONOCCURRENCE_METHODS
@@ -215,13 +263,13 @@ class BM25sIndex(SparseIndexABC, InMemoryGenerationalIndex):
                 continue
             # A live posting implies a live object with a token, so both are positive.
             average = total_length / live_count
-            idf = self._idf(len(slots), N=live_count)
+            idf = self._idf(len(slots), live_count)
             parameters = {"l_avg": average, "k1": self._k1, "b": self._b, "delta": _DELTA}
             frequencies = all_frequencies[present].astype(np.float64)
-            part = idf * self._tfc(tf_array=frequencies, l_d=lengths[slots], **parameters)
+            part = idf * self._tfc(frequencies, lengths[slots], **parameters)
             if self._nonoccurrence:
                 # BM25L/BM25+ also score objects lacking the term (as bm25s does).
-                missing = idf * self._tfc(tf_array=0, l_d=average, **parameters)
+                missing = idf * self._tfc(0, average, **parameters)
                 base += missing
                 part = part - missing
             contributions.append((slots, part))
@@ -269,8 +317,7 @@ class BM25sIndex(SparseIndexABC, InMemoryGenerationalIndex):
             if len(kept) >= limit and (not kept or score < kept[-1][1]):
                 break
             # Objects removed meanwhile have no metadata (and an empty id).
-            metadata = generation.metadata.get(ids[slot])
-            if metadata is None or not evaluate(filters, metadata):
+            if not generation.admits(ids[slot], filters):
                 continue
             kept.append((ids[slot], score))
         ordered = sorted(kept, key=lambda pair: (-pair[1], pair[0]))[:limit]

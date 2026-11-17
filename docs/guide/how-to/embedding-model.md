@@ -1,11 +1,14 @@
 # Use your own embedding model
 
-RetrievalLoom does not ship an embedding model. Dense retrieval is enabled as
-soon as you pass one in `Components(embedding=...)`.
+Add semantic search so users find the right passage even when they paraphrase.
+Pass any embedding model in `Components(embedding=...)` and the dense method
+starts at once: a hosted API, a local sentence-transformers model, or your own.
+RetrievalLoom does not ship a model, so you choose the one that fits your
+languages and budget.
 
-## The contract
+## What to implement
 
-Subclass `EmbeddingModelABC` and implement:
+Wrap your model in a subclass of `EmbeddingModelABC` and implement:
 
 | Member | Purpose |
 | --- | --- |
@@ -16,10 +19,11 @@ Subclass `EmbeddingModelABC` and implement:
 | `embed_query(text)` | One vector. |
 | `initialize(context)` | Optional. Keep `context.offloader` and load the model. |
 
-The engine validates every call: vector count, dimensions, finite values and
-non-zero norm. A violation raises `EmbeddingValidationError`.
+The engine checks every result, so a faulty model cannot corrupt your index:
+the vector count, dimensions, finite values and non-zero norm. A violation
+raises `EmbeddingValidationError`.
 
-## A complete adapter
+## Write an adapter
 
 The model below is a toy so the example runs anywhere. Replace `_encode` with
 your model's blocking call. Everything else stays the same.
@@ -103,7 +107,7 @@ asyncio.run(main())
 The vectors go to the default `QdrantVectorStore` (in memory here). The output
 lists `index.dense` next to the other methods.
 
-## Why the offloader
+## Keep the event loop free
 
 `embed_documents` and `embed_query` are coroutines, but the model call inside
 them is blocking. Calling it directly would stall every other request on the
@@ -114,9 +118,9 @@ worker thread under the tenant fair share and resourcera admission. See
 If your model is an async HTTP API, await the client directly. No offloading is
 needed.
 
-## Changing the model
+## Change the model
 
-The model identity and dimensions are part of the dense unit's dependency
+You can switch models without downtime. The model identity and dimensions are part of the dense unit's dependency
 fingerprint. When you restart with a different model, the existing generation
 no longer matches. Retrieval skips the dense method with a `stale_coverage`
 warning until the lifecycle has built a new generation with the new model.
@@ -124,14 +128,21 @@ warning until the lifecycle has built a new generation with the new model.
 Each dimensionality uses its own Qdrant collection, so old and new vectors
 never mix.
 
-## Query embedding cache
+## Cache query embeddings
 
 Query vectors are cached per tenant in an LRU cache
 (`RetrievalConfig.embedding_cache_size`, default 1024 entries;
 `embedding_cache_ttl`, default 600 s). Set the size to `0` to disable it.
 
-## Real models
+## Use a real model
 
-The [customer support example](../../examples/customer-support.md)
-wires BAAI/bge-m3 through `FlagEmbedding` (see [custom components](../../examples/adapters.md)) to a Qdrant server. Use a server or a
-persistent path for production data: see [Qdrant](../../integrations/qdrant.md).
+The [customer support example](../../examples/customer-support.md) connects
+BAAI/bge-m3 through `FlagEmbedding` to a Qdrant server; the adapter is on
+[Custom components](../../examples/adapters.md). For production data, use a
+Qdrant server or a persistent path: see [Qdrant](../../integrations/qdrant.md).
+
+## Next steps
+
+- Improve the top results with [a reranker](rerank-and-nli.md).
+- Add semantic search to documents you already indexed with
+  [Backfill and rebuild](backfill-and-rebuild.md).

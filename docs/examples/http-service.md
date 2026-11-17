@@ -2,9 +2,9 @@
 
 Most deployments run retrieval as a service that other applications call over HTTP.
 `examples/http_service.py` is a FastAPI app with one long-lived engine, tenant-aware
-authorisation, and error mapping from library exceptions to HTTP statuses.
+authorization, and error mapping from library exceptions to HTTP statuses.
 
-## Wiring
+## How it works
 
 - **Lifespan.** `create_app(make_engine)` builds the app. Its lifespan opens one engine at
   startup and closes it at shutdown, so in-flight requests finish and the background

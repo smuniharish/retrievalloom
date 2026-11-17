@@ -1,0 +1,25 @@
+{
+  "skill_name": "retrievalloom",
+  "queries": [
+    {"query": "add hybrid keyword and semantic search with retrievalloom to my RAG chatbot", "should_trigger": true, "split": "train"},
+    {"query": "retrievalloom results come back with status partial and index_missing after a restart", "should_trigger": true, "split": "train"},
+    {"query": "keep each customer's documents separate in retrievalloom and make sure one tenant can never retrieve another's", "should_trigger": true, "split": "train"},
+    {"query": "move our retrievalloom metadata from SQLite to PostgreSQL so two servers can share it", "should_trigger": true, "split": "train"},
+    {"query": "erase a user's documents from retrievalloom for a GDPR request", "should_trigger": true, "split": "train"},
+    {"query": "my retrieval engine never uses the FlashRank reranker even though reranking is enabled", "should_trigger": true, "split": "train"},
+    {"query": "turn on the graph channel in retrievalloom for documents we already ingested", "should_trigger": true, "split": "validation"},
+    {"query": "filter retrievalloom evidence to team=finance documents from 2024 and cite the source url", "should_trigger": true, "split": "validation"},
+    {"query": "record retrievalloom retrievals in our agxai audit trail", "should_trigger": true, "split": "validation"},
+    {"query": "retrievalloom ingest returns before documents are searchable; how do I wait for indexing", "should_trigger": true, "split": "validation"},
+    {"query": "implement a retrievalloom vector store backed by pgvector and run the contract tests", "should_trigger": false, "split": "train"},
+    {"query": "write a custom RerankerABC around our Cohere rerank endpoint", "should_trigger": false, "split": "train"},
+    {"query": "build a LlamaIndex VectorStoreIndex over my PDFs", "should_trigger": false, "split": "train"},
+    {"query": "tune Elasticsearch BM25 parameters for our product catalog", "should_trigger": false, "split": "train"},
+    {"query": "add a Redis cache to my FastAPI endpoints", "should_trigger": false, "split": "train"},
+    {"query": "explain to auditors why my LangGraph agent routed a loan to manual review", "should_trigger": false, "split": "train"},
+    {"query": "my retrievalloom SparseIndexContract test fails on test_sealed_generation_mutability", "should_trigger": false, "split": "validation"},
+    {"query": "fine-tune a sentence-transformers embedding model on our support tickets", "should_trigger": false, "split": "validation"},
+    {"query": "configure a LangChain EnsembleRetriever with BM25 and FAISS", "should_trigger": false, "split": "validation"},
+    {"query": "set up row-level security policies in PostgreSQL", "should_trigger": false, "split": "validation"}
+  ]
+}

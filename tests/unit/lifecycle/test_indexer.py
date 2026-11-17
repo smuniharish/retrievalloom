@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
@@ -28,12 +29,12 @@ from retrievalloom.domain.records import (
 )
 from retrievalloom.errors import BackendUnavailableError, VersionConflictError
 from retrievalloom.graph.normalizer import IdentityGraphNormalizer
-from retrievalloom.index.text import StaticKeywordDictionary
+from retrievalloom.index.text import MetadataKeywordDictionary, StaticKeywordDictionary
 from retrievalloom.lifecycle.canonical import document_uid
 from retrievalloom.lifecycle.derivation import derive_chunks
 from retrievalloom.lifecycle.indexer import ReaderTracker, _supporting_versions, task_units
 from retrievalloom.lifecycle.ingestion import GraphDerivation
-from retrievalloom.lifecycle.units import DICTIONARY_DIGEST, ItemPreparer
+from retrievalloom.lifecycle.units import DICTIONARY_DIGEST, DICTIONARY_REVISION, ItemPreparer
 from retrievalloom.storage.sqlite import SQLiteTransaction
 from tests.fakes import CapitalizedExtractor
 from tests.unit.lifecycle.helpers import (
@@ -50,6 +51,7 @@ from tests.unit.lifecycle.helpers import (
 from tests.unit.lifecycle.test_derivation import record
 
 if TYPE_CHECKING:
+    from retrievalloom.contracts.component import ComponentContext
     from retrievalloom.domain.records import CoverageRecord
     from retrievalloom.lifecycle.units import IndexUnit
     from retrievalloom.storage.base import PointerRow
@@ -264,6 +266,66 @@ async def test_keyword_dictionary_change_forces_a_full_build(store: SQLiteMetada
     dictionary.current = (KeywordEntry(canonical="d1", aliases=("first",)),)
     assert (await run("d5")).generation_id != second.generation_id
     assert set((await active_items(h)).values()) == {"d1", "d2", "d3", "d4", "d5"}
+    assert isinstance(second.stats[DICTIONARY_REVISION], str)
+
+
+async def test_metadata_keywords_rebuild_only_when_terms_come_or_go(
+    store: SQLiteMetadataStore,
+) -> None:
+    dictionary = MetadataKeywordDictionary()
+    await dictionary.initialize(cast("ComponentContext", SimpleNamespace(metadata_store=store)))
+    preparer = ItemPreparer(tokenizer=None, embedder=None, dictionary=dictionary)
+    h = build(store, [index_unit(DictIndex(), method="keyword")], preparer=preparer)
+
+    async def run(*documents: DocumentInput, delete: tuple[str, ...] = ()) -> str:
+        if documents:
+            await h.ingestion.ingest(list(documents), SCOPE)
+        if delete:
+            await h.ingestion.delete(list(delete), SCOPE)
+        await h.indexer.run(SCOPE, h.unit)
+        ref = await pointer(h)
+        assert ref is not None
+        return ref.generation_id
+
+    first = await run(text_doc("d1", "a"))
+    second = await run(text_doc("d2", "b", metadata={"keywords": "x"}))
+    assert second != first
+    # Known terms only change counts: updated in place.
+    assert await run(text_doc("d3", "c", metadata={"keywords": ["x"]})) == second
+    assert await run(delete=("d2",)) == second
+    assert await run(delete=("d3",)) != second
+
+
+async def test_coverage_scans_only_documents_changed_since_the_watermark(
+    store: SQLiteMetadataStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = harness(store)
+    await h.ingestion.ingest([text_doc("d1", "a"), text_doc("d2", "b")], SCOPE)
+    await h.ingestion.delete(["d2"], SCOPE)
+    await h.indexer.run(SCOPE, h.unit)
+    scans: list[int] = []
+    original = SQLiteTransaction.list_changed_documents
+
+    async def spy(self: SQLiteTransaction, scope_key: str, **kwargs: Any) -> Any:
+        scans.append(kwargs["after_seq"])
+        return await original(self, scope_key, **kwargs)
+
+    monkeypatch.setattr(SQLiteTransaction, "list_changed_documents", spy)
+    # Another engine instance's unit has no watermark: it covers the whole scope once.
+    other = index_unit(DictIndex(), instance_id="inst_other")
+    assert await h.indexer.needs_work(SCOPE, other)
+    await h.indexer.run(SCOPE, other)
+    assert scans == [-1]
+    assert (await coverage(h, "d1", other)).state == CoverageState.READY
+    async with store.transaction(SCOPE, write=False) as transaction:
+        watermark = await transaction.get_coverage_watermark(other.key(SCOPE))
+    assert watermark is not None
+    assert not await h.indexer.needs_work(SCOPE, other)
+    scans.clear()
+    await h.ingestion.ingest([text_doc("d3", "c")], SCOPE)
+    await h.indexer.run(SCOPE, other)
+    assert scans == [watermark]
+    assert (await coverage(h, "d3", other)).state == CoverageState.READY
 
 
 async def test_document_changed_while_writing_is_written_again(

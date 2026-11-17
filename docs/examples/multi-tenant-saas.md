@@ -8,7 +8,7 @@ employee handbook, engineering docs), and its users have roles. The example show
 - each tenant gets its own quotas;
 - every access is audited.
 
-## Wiring
+## How it works
 
 - **Scopes.** `Scope(tenant_id=..., collection=...)` partitions every index, cache entry
   and lifecycle task. Data comes from `data/saas_tenants.json`: `acme/handbook`,

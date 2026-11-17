@@ -1,7 +1,8 @@
 # Contracts
 
-Every pluggable component subclasses one of these `abc.ABC` classes. See
-[Write a custom backend](../guide/how-to/custom-backends.md).
+Replace any part of the engine by subclassing one of these abstract base
+classes. Each class lists the methods your implementation must provide. See
+[Write your own backend](../guide/how-to/custom-backends.md).
 
 ## Component base
 

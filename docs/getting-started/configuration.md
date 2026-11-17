@@ -1,5 +1,13 @@
 # Configuration
 
+The defaults run a complete in-memory engine, so you change only what your
+workload needs: how long a request may take, which search methods run, how many
+results come back, and how much each customer may use. This page lists the
+settings you are most likely to change. The [API reference](../api/config.md)
+lists every field.
+
+## Create a configured engine
+
 An engine takes three arguments, all optional:
 
 | Argument | Type | Holds |
@@ -8,8 +16,9 @@ An engine takes three arguments, all optional:
 | `components` | `Components` | Your own components. `None` fields select the defaults. |
 | `resources` | `EngineResources` | Application-owned infrastructure: `data_dir`, `resource_manager`, `executor`, `xai_runtime`, `metrics` |
 
-Configuration models are frozen pydantic models that reject unknown fields.
-Build them once and pass them in.
+Configuration objects are immutable Pydantic models that reject unknown
+fields, so a typo fails at once instead of being ignored. Build them once and
+pass them in:
 
 ```python
 from pathlib import Path
@@ -44,12 +53,14 @@ config = EngineConfig(
 engine = RetrievalEngine(config, resources=EngineResources(data_dir=Path("rl-data")))
 ```
 
-`create_retrieval_engine(ingestion=..., retrieval=..., lifecycle=..., offloader=...,
-components=..., resources=...)` builds the same engine from the individual layers.
+If you prefer keyword arguments, `create_retrieval_engine(ingestion=...,
+retrieval=..., lifecycle=..., offloader=..., components=..., resources=...)`
+builds the same engine.
 
-## Ingestion
+## Control how documents are ingested
 
-`IngestionConfig`:
+`IngestionConfig` decides whether `ingest` waits until new documents are
+searchable, how invalid documents are handled, and how large one call may be.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
@@ -61,9 +72,10 @@ components=..., resources=...)` builds the same engine from the individual layer
 | `redelivery_window_seconds` | `300` | Window for the `possible_redelivery` warning. `0` disables it. |
 | `limits` | `IngestionLimits()` | Per-call limits: documents (1000), representations (16), chunks (10000), text characters (10 000 000), tree depth (64) and nodes (50000), graph items (50000). |
 
-## Retrieval
+## Control how searches run
 
-`RetrievalConfig`:
+`RetrievalConfig` decides which search methods run, how their results are
+merged, how many results come back, and how long a request may take.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
@@ -87,11 +99,7 @@ components=..., resources=...)` builds the same engine from the individual layer
 | `default_tenant_policy` | `TenantPolicy()` | Limits for tenants without their own policy. |
 | `tenant_policies` | `{}` | Per-tenant `TenantPolicy`, keyed by tenant id. |
 
-Whether a change is applied in place or through a new generation depends on the
-backend, as described in
-[Generations and coverage](../guide/concepts/lifecycle.md).
-
-### Method settings
+### Tune each search method
 
 Each method of the index channel (`keyword`, `fuzzy`, `sparse`, `dense`) has a
 `MethodConfig`:
@@ -106,22 +114,27 @@ Each method of the index channel (`keyword`, `fuzzy`, `sparse`, `dense`) has a
 `fuzzy` uses `FuzzyConfig`, which adds `score_cutoff` (85), `max_ngram` (3),
 `corpus_vocabulary` (`True`) and `min_token_length` (3).
 
-### Fusion
+### Choose how rankings are merged
 
-`FusionConfig.method` is one of `rrf`, `weighted_rrf`, `weighted_score`,
-`combsum` or `combmnz`. Score-based methods normalise each list first with
-`normalizer`: `minmax` (default), `zscore`, `rank` or `sigmoid`.
+Fusion merges the ranked lists of several methods into one. `FusionConfig.method`
+is one of `rrf`, `weighted_rrf`, `weighted_score`,
+`combsum` or `combmnz`. Score-based methods normalize each list first with
+`normalizer`: `minmax` (default), `zscore`, `rank` or `sigmoid`. Reciprocal rank
+fusion (`rrf`, the default) uses only ranks, so it needs no normalization.
 
-### Consolidation
+### Group results into evidence
 
-`ConsolidationConfig` controls how candidates become evidence:
+`ConsolidationConfig` controls how matching passages are grouped into the
+evidence items you receive:
 `window_multiplier` (3), `group_structural` (`True`), `merge_adjacent` (`True`),
 `span_iou_threshold` (0.5), `semantic_relations` (`False`),
 `semantic_threshold` (0.9) and `contradiction_overflow`.
 
-### Tenant policy
+### Limit each tenant
 
-`TenantPolicy` limits one tenant:
+`TenantPolicy` caps what one tenant can use, so a busy customer cannot slow
+down the others. Set a default for everyone in `default_tenant_policy` and
+overrides in `tenant_policies`:
 
 | Field | Default |
 | --- | --- |
@@ -132,9 +145,12 @@ Each method of the index channel (`keyword`, `fuzzy`, `sparse`, `dense`) has a
 | `max_ingest_batch` | `1000` |
 | `allowed_channels` | all channels |
 
-## Lifecycle
+## Control background indexing and retention
 
-`LifecycleConfig` controls background indexing and maintenance:
+`LifecycleConfig` decides when indexing runs, how an engine rebuilds its
+in-memory indexes after a restart, and how long deleted documents, old versions
+and history are kept. For how indexing works, see
+[Generations and coverage](../guide/concepts/lifecycle.md).
 
 | Field | Default | Meaning |
 | --- | --- | --- |
@@ -142,7 +158,9 @@ Each method of the index channel (`keyword`, `fuzzy`, `sparse`, `dense`) has a
 | `poll_interval` | `2` | Seconds between background rounds. |
 | `batch_size` | `128` | Documents per backend write batch. |
 | `max_concurrency` | `4` | Index units processed concurrently. |
-| `max_attempts` | `3` | Attempts per unit round. Retryable errors are retried by refresh-engine. |
+| `max_attempts` | `3` | Attempts per unit round for retryable errors, and attempts per document before its coverage is marked `failed`. |
+| `retry_failed_after` | `30` | Seconds before coverage that failed with a retryable error, such as a `BackendUnavailableError` during an outage, is queued again. The delay doubles with each further failure. Non-retryable failures stay `failed` until a `backfill`. `None` disables automatic retries. |
+| `retry_failed_max_delay` | `900` | Upper bound, in seconds, of the doubling retry delay. |
 | `unit_timeout` | `600` | Seconds one unit round may take. |
 | `instance_ttl` | `120` | Seconds an engine instance stays registered without a heartbeat. |
 | `lease_ttl` | `120` | Seconds a durable reader lease lasts. See [Run several engines on one store](../guide/how-to/multiple-engines.md). |
@@ -151,14 +169,17 @@ Each method of the index channel (`keyword`, `fuzzy`, `sparse`, `dense`) has a
 | `wait_for_rebuild` | `False` | With `background`, still finish the startup rebuild before the engine opens, so the first requests get no `index_missing` warnings. |
 | `rebuild_timeout` | `300` | Seconds a startup rebuild may delay opening when `background` is on. On timeout the engine opens and the rebuild continues in the background. |
 | `purge_after` | `604800` (7 days) | Seconds a deleted document stays a tombstone before maintenance erases it physically. `None` disables. |
-| `max_versions` | `10` | Version-history entries kept per document. Older versions that nothing references are pruned with their representations. `None` disables. |
+| `max_versions` | `10` | Version-history entries kept per document. Older versions that nothing references (including the `version_after` of a retained ingestion event) are pruned with their representations. `None` disables. |
 | `event_retention` | `7776000` (90 days) | Seconds committed and failed ingestion events are kept. `None` disables. |
+| `purge_log_retention` | `86400` (1 day) | Seconds purge-log entries are kept. Other engines read the log each lifecycle round to evict purged documents from their in-memory indexes; an engine that misses pruned entries rebuilds those indexes instead. Keep it well above `instance_ttl`. |
 | `migration` | `auto` | `auto` upgrades the metadata schema on start. `verify` only checks it. |
 | `shutdown_timeout` | `30` | Seconds `close` waits for in-flight work. |
 
-## Offloader
+## Size the worker pool
 
-`OffloaderConfig` sizes the thread pool for blocking work. See
+Blocking work, such as model inference and index builds, runs in a thread pool
+so it never stalls your event loop. `OffloaderConfig` sizes that pool and caps
+how much of it one tenant may use. See
 [Offloading and admission](../guide/concepts/offloading.md).
 
 | Field | Default |
@@ -173,10 +194,10 @@ Each method of the index channel (`keyword`, `fuzzy`, `sparse`, `dense`) has a
 | `shutdown_timeout` | `30` |
 | `resource_config` | resourcera `ResourceConfig(cpu_budget_fraction=0.05)` |
 
-## Per request
+## Override settings for one request
 
-`retrieve` takes a `RetrievalExecutionConfig` that overrides the configuration
-for one request. Its channel and method fields are tri-state: `None` keeps the
+Pass a `RetrievalExecutionConfig` to `retrieve` to change the configuration for
+that request only, for example to compare methods or to turn on reranking. Its channel and method fields are tri-state: `None` keeps the
 configured value, `True` forces the method on, `False` turns it off.
 
 ```python
@@ -193,4 +214,8 @@ Forcing a method on that has no backend produces a `method_unavailable` warning
 of severity `warning`. Forcing on a channel the tenant policy forbids raises
 `ConfigurationError`.
 
-The full list of fields is in the [API reference](../api/config.md).
+## Next steps
+
+- Learn which [channels and methods](../guide/concepts/channels.md) to enable.
+- Add semantic search with [your own embedding model](../guide/how-to/embedding-model.md).
+- See every field in the [API reference](../api/config.md).

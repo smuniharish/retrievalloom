@@ -1,6 +1,7 @@
 # Configuration
 
-Configuration models are frozen pydantic models. Every field has a default; see
+Every setting the engine accepts. Configuration objects are immutable Pydantic
+models, and every field has a default; see
 [Configuration](../getting-started/configuration.md) for the common settings.
 
 ## Engine

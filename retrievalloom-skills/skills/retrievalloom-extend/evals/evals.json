@@ -1,0 +1,62 @@
+{
+  "skill_name": "retrievalloom-extend",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "We run our own BM25 search service; client.py is its Python client. Make RetrievalLoom use it for the sparse method instead of the built-in index, and prove it works with RetrievalLoom's contract tests.",
+      "expected_output": "A SparseIndexABC subclass adapted from assets/sparse_index_template.py that maps each (scope.key, generation_id) pair to its own collection, runs every blocking client call through context.offloader, scores SparseQuery.tokens, returns RetrievalHit objects with ranks from 1 and only positive scores, plus a SparseIndexContract test that passes, and wiring through Components(sparse_index=...).",
+      "files": ["files/inhouse_search/client.py"],
+      "assertions": [
+        "The adapter subclasses SparseIndexABC and implements create_generation, write, remove, update_metadata, seal, drop_generation, list_generations, capabilities, info, and search",
+        "Collection names combine scope.key (or a digest of it) and the generation id, so two scopes with the same generation id never share data, and list_generations returns only the scope's generations",
+        "Blocking client calls run through context.offloader.run with a WorkloadKind, not directly on the event loop",
+        "create_generation, drop_generation, and remove tolerate repeats and unknown ids instead of raising KeyError",
+        "Hits have object_ref.scope_key == scope.key, MethodRef(channel=Channel.INDEX, method='sparse'), and ranks 1, 2, 3",
+        "A test subclasses SparseIndexContract with make_component returning the adapter, run with asyncio_mode auto",
+        "The component is passed to the engine as Components(sparse_index=...)"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "My custom sparse index in index.py fails 8 SparseIndexContract tests (scopes, idempotency, remove, sealed generation, cancellation). Fix the index, not the tests.",
+      "expected_output": "index.py keyed by (scope.key, generation_id), with idempotent create_generation and drop_generation, remove that is always accepted and returns how many objects were present, update_metadata that ignores absent objects, write after seal raising GenerationError because mutable_in_place is False, hits only for positive scores with ranks from 1 and filters applied before the limit, and the blocking call moved off the event loop; all SparseIndexContract tests pass.",
+      "files": ["files/broken_index/index.py"],
+      "assertions": [
+        "Storage is keyed by scope.key and generation id, and list_generations filters by scope",
+        "write after seal raises a RetrievalLoomError such as GenerationError (or capabilities declare mutable_in_place=True and writes apply)",
+        "remove is accepted after seal and for unknown ids, and returns only the number of objects that were present",
+        "Objects with a zero score are not returned, ranks start at 1, and filters are applied before the limit",
+        "time.sleep is removed or the blocking work runs through the offloader, and cancellation propagates",
+        "The kit tests are not edited, skipped, or weakened"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Write a RetrievalLoom embedding model for our internal embedding HTTP API (POST /embed with {\"texts\": [...]} returns {\"vectors\": [[...]]}, model e5-large-v2, 1024 dimensions) using httpx, and a test for it.",
+      "expected_output": "An EmbeddingModelABC subclass with info from make_info(model_identity='e5-large-v2', dimensions=1024, ...), an httpx.AsyncClient awaited directly (not offloaded), batching by max_batch_size, validation of the response length, close() that closes only a client it created, and an EmbeddingModelContract test against a stub transport or a test server.",
+      "files": [],
+      "assertions": [
+        "Subclasses EmbeddingModelABC and implements info, dimensions, embed_documents, and embed_query",
+        "info carries model_identity and dimensions so a model change triggers a rebuild of dense generations",
+        "Uses httpx.AsyncClient and awaits it directly instead of blocking the event loop",
+        "Does not close an httpx client passed in by the application; closes only one it created",
+        "Includes a test that subclasses EmbeddingModelContract, using httpx.MockTransport or a local stub so it runs offline",
+        "Passes the model to the engine as Components(embedding=...)"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Our API gets a verified JWT with claims tenant and groups. In RetrievalLoom, users may only retrieve documents whose metadata 'group' is one of their groups, and only members of 'kb-admins' may ingest or delete. Implement that and test it.",
+      "expected_output": "An AccessPolicyABC subclass adapted from assets/access_policy_template.py: authorize denies a different tenant and write actions (ingest, delete, backfill, rebuild) for non-admins, row_filter returns In(field='group', values=groups), the application passes the authenticated subject as principal, and engine-level tests prove denial raises AccessDeniedError and that a user never sees another group's documents.",
+      "files": [],
+      "assertions": [
+        "Subclasses AccessPolicyABC and implements authorize returning AccessDecision and row_filter returning a FilterExpression",
+        "Write actions include Action.DELETE, which also covers purge",
+        "row_filter restricts to the user's groups (In or Or of Eq), relying on the engine to combine it with request filters",
+        "The principal passed to the engine comes from the verified token, not from request input",
+        "Tests run through a real engine and assert AccessDeniedError for a denied action and the absence of another group's document",
+        "Notes that access policies have no contract kit"
+      ]
+    }
+  ]
+}

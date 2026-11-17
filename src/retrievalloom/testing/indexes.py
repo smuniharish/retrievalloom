@@ -289,7 +289,7 @@ class SparseIndexContract(GenerationalIndexContract):
         filters: FilterExpression | None,
     ) -> Sequence[RetrievalHit]:
         """Sparse search over query tokens."""
-        query = SparseQuery(tokens=tuple(text.casefold().split()))
+        query = SparseQuery(tokens=tuple(text.casefold().split()), text=text)
         return await component.search(scope, generation_id, query, limit, filters)
 
 

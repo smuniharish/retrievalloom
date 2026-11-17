@@ -155,10 +155,122 @@ The whole engine (`scripts/benchmark.py --queries 200`), same machine:
 | 20,000 | before | 26 documents/s | 153.00 ms | 44.43 ms | 225.2 ms |
 | 20,000 | after | 445 documents/s | 122.06 ms | 41.10 ms | 233.2 ms |
 
-Ingest is about 17–19 times faster. It still slows somewhat as the corpus
-grows, because two checks still read the whole scope on every batch: the
-check for documents without coverage and the metadata keyword dictionary. A
-batch of 500 takes about 1.5 s at 1,000 documents and about 1.9 s at 15,000.
+Ingest is about 17–19 times faster. It still slowed somewhat as the corpus
+grew, because two checks read the whole scope on every batch: the check for
+documents without coverage and the metadata keyword dictionary. A batch of 500
+took about 1.5 s at 1,000 documents and about 1.9 s at 15,000.
+
+## Ingest at any corpus size
+
+Those two checks no longer read the whole scope:
+
+- **Coverage.** Each index unit keeps a watermark: the highest
+  `change_seq` it has created coverage rows for. Each pass reads only the
+  documents changed after it, through the `(scope_key, change_seq)` index. A
+  unit without a watermark (a new unit, or a new engine instance with its own
+  in-memory indexes) reads the scope once.
+- **Keyword dictionary.** The metadata store keeps the dictionary's terms with
+  the number of active documents using each. Ingest and delete adjust the
+  counts in their own write transaction, and the dictionary's revision changes
+  only when a term appears or disappears. The indexer compares that revision,
+  one row, instead of digesting every entry. The terms are read only when a
+  keyword or fuzzy build needs them.
+
+The whole engine (`scripts/benchmark.py`), alternating the previous and the
+current code on the same machine. The machine was running other workloads, so
+absolute numbers are lower than in [Results](#results) and vary between runs:
+
+| Corpus | Ingest, before | Ingest, after |
+| --- | ---: | ---: |
+| 2,000 | 273–399 documents/s | 261–335 documents/s |
+| 20,000 | 264–282 documents/s | 328–340 documents/s |
+| 100,000 | not run | 340 documents/s |
+
+Before, throughput dropped as the corpus grew. After, it stays the same from
+2,000 to 100,000 documents, and at 20,000 it is about 20% higher. At 2,000 the
+difference is within the noise. At 20,000 documents the dictionary check takes
+48 ms per unit and batch instead of 159 ms, including waits for the store.
+
+The ingest figure in [Results](#results) was measured on a quieter machine
+before this change and has not been re-measured there.
+
+## Memory and restart time
+
+The default keyword, fuzzy and sparse indexes live in memory in every engine
+process. A process rebuilds them from the metadata store when it opens. The
+table shows one restart on a SQLite store that already holds the corpus, run
+with `LifecycleConfig(background=False)` so the engine opens only after the
+rebuild. "Index memory" is the growth in resident memory while the engine
+opens. "Retrieve p50" is the median of 100 sequential requests after opening;
+none of them reported `index_missing`.
+
+| Documents | Open | Index memory | Peak memory | Retrieve p50 | Database |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 2.2 s | 36 MB | 149 MB | 12 ms | < 1 MB |
+| 2,000 | 4.1 s | 84 MB | 206 MB | 51 ms | 15 MB |
+| 20,000 | 26.8 s | 443 MB | 643 MB | 59 ms | 152 MB |
+| 100,000 | 157 s | 2,004 MB | 2,533 MB | 137 ms | 758 MB |
+
+Beyond a fixed overhead of about 36 MB and 2 seconds, each document costs
+about 20 KB of memory and 1.5 ms of restart time. Both grow linearly with the
+corpus. The peak during the rebuild is about a quarter above the steady state.
+
+Two changes made restart and retrieval scale this way:
+
+- **Rebuild reads.** A full rebuild pages through the scope's objects in id
+  order. Before migration `0006_objects_kind_order`, the index behind those
+  pages did not cover the order, so each page sorted the whole scope and a
+  rebuild took quadratic time: at 100,000 documents the rebuild ran past
+  `unit_timeout` (600 seconds). The new index serves each page with a seek.
+- **Common terms.** Keyword and fuzzy search now add up scores across a
+  term's postings, evaluate filters once per object and build match details
+  only for the returned hits. A fuzzy search at 100,000 documents, where
+  matched terms appear in most documents, dropped from 538 ms to 88 ms.
+
+### Sizing guidance
+
+- The in-memory defaults suit corpora up to about 100,000 documents per
+  process. Plan about 20 KB of memory per document in every process that
+  opens the engine.
+- With `background=False`, each unit's startup rebuild is bounded by
+  `LifecycleConfig.unit_timeout` (600 seconds). A rebuild that runs over is
+  logged as `lifecycle_round_errors`, and requests skip that index with
+  `index_missing` warnings until the next lifecycle round succeeds. Raise
+  `unit_timeout` for large corpora.
+- To serve requests while a large rebuild runs, keep the background scheduler
+  (the default). Set `wait_for_rebuild=True` only when the rebuild fits in
+  `rebuild_timeout`.
+- For larger corpora, or to avoid rebuilding at every restart, give the
+  channels durable backends such as Qdrant, pgvector or Neo4j. Disk-backed
+  indexes are reused on restart rather than rebuilt; see
+  [Keep data on disk](guide/how-to/durable-storage.md).
+
+### Statements per operation
+
+Statements the SQLite store executed for one operation on a 2,000-document
+scope, before and after the batched retirement and snapshot changes in this
+release:
+
+| Operation | Before | After |
+| --- | ---: | ---: |
+| Retrieve, per request | 16 | 8 |
+| Update 200 documents | 371 | 179 |
+| Delete 200 documents | 1,725 | 138 |
+| Purge 200 documents | 1,869 | 81 |
+| Ingest 2,000 documents | 1,220 | 1,310 |
+| Rebuild | 440 | 449 |
+
+Taking a retrieval snapshot fell from 11.6 ms to 2.3 ms at the median.
+
+To reproduce the restart table:
+
+```bash
+uv run python scripts/scale.py --documents 100000
+```
+
+The script ingests the corpus into a SQLite file, then opens a fresh process
+on it and reports the numbers above as JSON. `--skip-build --db PATH` reuses an
+existing database.
 
 ## Environment
 

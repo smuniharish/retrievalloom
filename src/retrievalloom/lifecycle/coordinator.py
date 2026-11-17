@@ -136,6 +136,7 @@ class LifecycleCoordinator:
         self._eraser = eraser
         self._started_at = clock()
         self._housekept_at = datetime.min.replace(tzinfo=UTC)
+        self._retried_at = datetime.min.replace(tzinfo=UTC)
         self._targets: dict[str, _Target] = {}
         self._scheduler: AsyncScheduler | None = None
         self._kicked: asyncio.Task[None] | None = None
@@ -188,7 +189,12 @@ class LifecycleCoordinator:
 
     # rounds -----------------------------------------------------------------------------
     async def run_once(self, scope: Scope | None = None) -> RefreshResult:
-        """Run one lifecycle round (all scopes, or only ``scope``)."""
+        """Run one lifecycle round (all scopes, or only ``scope``).
+
+        The round first evicts objects other engines purged from this engine's
+        engine-local units; a failed eviction is logged and retried next round.
+        """
+        await self._evict_purged()
         if scope is None:
             result = await self._refresh.refresh(mode=RefreshMode.FULL)
         else:
@@ -225,6 +231,7 @@ class LifecycleCoordinator:
         for scope in scopes:
             for unit in self._units:
                 await self._indexer.reconcile(scope, unit)
+        await self._retry_failed(scopes, now)
         for instance in expired:
             async with self._store.transaction(write=True) as transaction:
                 await transaction.purge_instance(instance)
@@ -235,8 +242,74 @@ class LifecycleCoordinator:
         for scope in scopes:
             await self.housekeep(scope)
 
+    async def _retry_failed(self, scopes: Sequence[Scope], now: datetime) -> None:
+        """Queue failed coverage again whose retryable error has outlived its backoff.
+
+        Coverage fails after ``max_attempts`` attempts; when the last error is retryable
+        (a backend outage, a timeout) the row is set pending again once
+        ``retry_failed_after * 2 ** (attempts - max_attempts)`` seconds (at most
+        ``retry_failed_max_delay``) have passed since it failed. ``attempts`` is kept,
+        so every further failure doubles the delay; a backfill resets it. The sweep
+        runs at most every ``retry_failed_after / 2`` seconds and is idempotent, so
+        engines sharing the store may run it concurrently.
+        """
+        config = self._config
+        initial = config.retry_failed_after
+        if initial is None or now - self._retried_at < timedelta(seconds=initial / 2):
+            return
+        self._retried_at = now
+        for scope in scopes:
+            for unit in self._units:
+                requeued = await self._requeue_failed(scope, unit, now, initial)
+                if requeued:
+                    self._logger.info(
+                        "failed_coverage_requeued",
+                        scope=scope.key,
+                        unit=unit.name,
+                        documents=requeued,
+                    )
+
+    async def _requeue_failed(
+        self, scope: Scope, unit: IndexUnit, now: datetime, initial: float
+    ) -> int:
+        config = self._config
+        key = unit.key(scope)
+        requeued = 0
+        cursor: str | None = None
+        while True:
+            async with self._store.transaction(scope, write=True) as transaction:
+                rows = await transaction.list_coverage(
+                    key,
+                    (CoverageState.FAILED,),
+                    limit=config.batch_size,
+                    after_document_uid=cursor,
+                )
+                due = [
+                    row
+                    for row in rows
+                    if row.last_error is not None
+                    and row.last_error.retryable
+                    and now - row.updated_at
+                    >= timedelta(
+                        seconds=min(
+                            initial * 2 ** min(32, max(0, row.attempts - config.max_attempts)),
+                            config.retry_failed_max_delay,
+                        )
+                    )
+                ]
+                await transaction.upsert_coverage(
+                    [
+                        row.model_copy(update={"state": CoverageState.PENDING, "updated_at": now})
+                        for row in due
+                    ]
+                )
+            requeued += len(due)
+            if len(rows) < config.batch_size:
+                return requeued
+            cursor = rows[-1].document_uid
+
     async def housekeep(self, scope: Scope) -> None:
-        """Purge expired tombstones and prune version history and events of ``scope``.
+        """Purge expired tombstones; prune events, version history and purge log of ``scope``.
 
         Failures are logged and retried on the next maintenance round.
         """
@@ -251,14 +324,8 @@ class LifecycleCoordinator:
                 )
             versions = 0
             events = 0
-            while config.max_versions is not None:
-                async with self._store.transaction(scope, write=True) as transaction:
-                    pruned = await transaction.prune_versions(
-                        scope.key, keep=config.max_versions, limit=config.batch_size
-                    )
-                versions += pruned
-                if pruned < config.batch_size:
-                    break
+            purge_log = 0
+            # Events first: a version stays while an event references it.
             while config.event_retention is not None:
                 async with self._store.transaction(scope, write=True) as transaction:
                     pruned = await transaction.prune_events(
@@ -269,13 +336,45 @@ class LifecycleCoordinator:
                 events += pruned
                 if pruned < config.batch_size:
                     break
+            while config.max_versions is not None:
+                async with self._store.transaction(scope, write=True) as transaction:
+                    pruned = await transaction.prune_versions(
+                        scope.key, keep=config.max_versions, limit=config.batch_size
+                    )
+                versions += pruned
+                if pruned < config.batch_size:
+                    break
+            while True:
+                async with self._store.transaction(scope, write=True) as transaction:
+                    pruned = await transaction.prune_purge_log(
+                        scope.key,
+                        before=now - timedelta(seconds=config.purge_log_retention),
+                        limit=config.batch_size,
+                    )
+                purge_log += pruned
+                if pruned < config.batch_size:
+                    break
         except Exception as exc:
             self._logger.error(
                 "lifecycle_housekeeping_failed", scope=scope.key, error_type=type(exc).__name__
             )
             return
-        if versions or events:
-            self._logger.info("history_pruned", scope=scope.key, versions=versions, events=events)
+        if versions or events or purge_log:
+            self._logger.info(
+                "history_pruned",
+                scope=scope.key,
+                versions=versions,
+                events=events,
+                purge_log=purge_log,
+            )
+
+    async def _evict_purged(self) -> None:
+        if self._eraser is None:
+            return
+        try:
+            await self._eraser.evict_purged()
+        except Exception as exc:
+            self._logger.error("purge_eviction_failed", error_type=type(exc).__name__)
 
     async def tick(self) -> None:
         """One background round: maintenance, then indexing."""
@@ -284,7 +383,14 @@ class LifecycleCoordinator:
             await self.maintain(housekeeping=due)
             await self.run_once()
         except Exception as exc:
-            self._logger.error("lifecycle_tick_failed", error_type=type(exc).__name__)
+            info = ErrorInfo.from_exception(exc)
+            self._logger.error(
+                "lifecycle_tick_failed",
+                error_type=type(exc).__name__,
+                error_code=info.code,
+                error=info.message,
+                details=info.details,
+            )
 
     async def start(self, *, rebuild: bool = False, rebuild_timeout: float | None = None) -> None:
         """Register the instance and start the background scheduler when enabled.
@@ -294,6 +400,8 @@ class LifecycleCoordinator:
         that round; on timeout the remaining work is left to the background rounds.
         A failed round stops the coordinator and re-raises.
         """
+        if self._eraser is not None:
+            await self._eraser.follow_purge_log()
         await self.maintain()
         if rebuild:
             try:

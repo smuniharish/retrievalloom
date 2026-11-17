@@ -1,10 +1,12 @@
 # refresh-engine
 
-[refresh-engine](https://pypi.org/project/refresh-engine/) runs the index
-lifecycle. You do not call it directly; this page explains what it does and the
-one contract you may implement: `MetricsSink`.
+Send RetrievalLoom's metrics to your monitoring system, and understand how
+background indexing is scheduled.
+[refresh-engine](https://pypi.org/project/refresh-engine/) runs background
+indexing with retries and timeouts. You do not call it directly; the one
+contract you may implement is `MetricsSink`.
 
-## Lifecycle rounds
+## How indexing rounds run
 
 The lifecycle coordinator wraps a `RefreshEngine`:
 
@@ -28,7 +30,7 @@ A round runs on the scheduler's tick, after a write (`ingest`, `delete`), or
 when you call `engine.run_lifecycle_once(scope)`. See
 [Generations and coverage](../guide/concepts/lifecycle.md).
 
-## Metrics
+## Collect metrics
 
 Pass a refresh-engine `MetricsSink` as `EngineResources(metrics=...)`. The
 default discards everything. The engine records:
@@ -76,3 +78,9 @@ asyncio.run(main())
 
 Both methods are awaited on the request path; keep them fast or hand the
 values to a queue.
+
+## Next steps
+
+- Trace requests end to end with the [Jaeger example](../examples/observability-jaeger.md).
+- Learn how rounds keep indexes current in
+  [Generations and coverage](../guide/concepts/lifecycle.md).

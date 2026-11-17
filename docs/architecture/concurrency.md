@@ -1,5 +1,10 @@
 # Concurrency and isolation
 
+The engine runs on one event loop, shares it with your application, and may
+share its metadata store with other engines. This page describes how it keeps
+the loop responsive, which limits bound concurrent work, what cancellation
+guarantees, and how scopes and engines stay isolated from each other.
+
 ## The event loop
 
 All public methods are coroutines and are meant to run on one event loop. The
@@ -60,11 +65,13 @@ Cancelling a `retrieve`, `ingest` or `delete` is safe:
 
 ## Several engines
 
-Several `RetrievalEngine` objects, in one process or several, can share one
-SQLite metadata file:
+Several `RetrievalEngine` objects can share one metadata store: a SQLite file
+for processes on one host, or a PostgreSQL database for engines on any number
+of hosts.
 
-- Writes are serialised by SQLite (`BEGIN IMMEDIATE`); optimistic row
-  revisions detect conflicting updates.
+- Writes of one scope run one at a time: SQLite has a single writer
+  (`BEGIN IMMEDIATE`), and PostgreSQL takes a per-scope advisory lock.
+  Optimistic row revisions detect conflicting updates.
 - Generation pointers move by compare-and-swap, so two engines building the
   same unit cannot both publish over the same predecessor.
 - Every engine registers an instance row with a heartbeat. Rows of instances
@@ -87,6 +94,6 @@ See [Run several engines on one store](../guide/how-to/multiple-engines.md).
   scope key with every item (or use one database per scope and generation).
 - Results are validated before they are returned: any object of another scope
   raises `TenantIsolationError`. This error is never degraded into a warning.
-- The access policy (`AccessPolicyABC`) authorises each operation and can add
+- The access policy (`AccessPolicyABC`) authorizes each operation and can add
   a row filter. The default allows everything; replace it in production. See
-  [Filter and authorise](../guide/how-to/filters-and-access.md).
+  [Filter and authorize](../guide/how-to/filters-and-access.md).

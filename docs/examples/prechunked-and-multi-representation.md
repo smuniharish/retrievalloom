@@ -1,6 +1,7 @@
 # Pre-chunked and multi-representation
 
-This example ingests one document, a pump manual, with two representations:
+Keep your own chunking and get exact page and section citations back. This example
+ingests one document, a pump manual, with two representations:
 
 - `body`, a `ChunksRepresentation` with the application's own chunks. Each chunk carries
   a character span into the original text, a page range and a section path. The engine

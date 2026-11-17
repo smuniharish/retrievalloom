@@ -4,7 +4,7 @@ A service restarts after a deploy, a crash or a scale-out, and it must answer at
 without re-ingesting anything. The example runs two engine processes one after the other
 against the same durable state and shows which indexes are reused and which are rebuilt.
 
-## Wiring
+## How it works
 
 - **Metadata.** `data_dir` holds the SQLite metadata store: documents, versions, coverage,
   index generations and lifecycle tasks. No Postgres is needed.
@@ -12,9 +12,9 @@ against the same durable state and shows which indexes are reused and which are 
   a Qdrant server.
 - **Learned sparse.** `BgeM3SparseIndex` (a custom `SparseIndexABC`) replaces the built-in
   BM25 index with bge-m3 lexical weights stored as Qdrant sparse vectors. Both adapters
-  share one loaded bge-m3 model. See [Custom adapters](adapters.md#learned-sparse-and-sparseindexabc)
+  share one loaded bge-m3 model. See [Custom components](adapters.md#learned-sparse-and-sparseindexabc)
   for how it fits the contract.
-- **Restart behaviour.** The keyword and fuzzy indexes are in-memory. At startup the engine
+- **Restart behavior.** The keyword and fuzzy indexes are in-memory. At startup the engine
   sees that their generations are gone and rebuilds them from the metadata store. The
   durable Qdrant generations are reused untouched, with no re-embedding.
 

@@ -159,11 +159,22 @@ class StructureChannelConfig(MethodConfig):
 
 
 class ChannelsConfig(FrozenModel):
-    """All channels."""
+    """All channels.
+
+    At least one channel must be enabled; an enabled index channel needs at least one
+    enabled method. An engine with nothing to index or query is rejected.
+    """
 
     index: IndexChannelConfig = Field(default_factory=IndexChannelConfig)
     graph: GraphChannelConfig = Field(default_factory=GraphChannelConfig)
     structure: StructureChannelConfig = Field(default_factory=StructureChannelConfig)
+
+    @model_validator(mode="after")
+    def _check(self) -> ChannelsConfig:
+        index = self.index.enabled and any(self.index.method(name).enabled for name in IndexMethod)
+        if not (index or self.graph.enabled or self.structure.enabled):
+            raise ValueError("at least one channel (and index method) must be enabled")
+        return self
 
 
 class FusionConfig(FrozenModel):
@@ -262,7 +273,15 @@ class LifecycleConfig(FrozenModel):
         poll_interval: Seconds between scheduled lifecycle rounds.
         batch_size: Documents per backend write batch.
         max_concurrency: Index units processed concurrently.
-        max_attempts: Attempts per unit round (refresh-engine retry).
+        max_attempts: Attempts per unit round (refresh-engine retry), and attempts per
+            document before its coverage is marked ``failed``.
+        retry_failed_after: Seconds before coverage that failed with a retryable error
+            (for example a backend outage) is queued again by the background lifecycle;
+            the delay doubles with every further failure up to
+            ``retry_failed_max_delay``. Non-retryable failures stay ``failed`` until a
+            backfill. ``None`` disables automatic retries.
+        retry_failed_max_delay: Upper bound, in seconds, of the retry delay of failed
+            coverage.
         unit_timeout: Seconds one unit round may take.
         instance_ttl: Seconds an engine-instance registration lives without heartbeat.
         lease_ttl: Seconds a durable reader lease lives.
@@ -283,6 +302,10 @@ class LifecycleConfig(FrozenModel):
             ``None`` disables.
         event_retention: Seconds committed or failed ingestion events are kept;
             ``None`` disables.
+        purge_log_retention: Seconds purge-log entries are kept. Engines evict purged
+            objects from their in-memory indexes by reading this log; an engine that
+            missed pruned entries rebuilds its in-memory indexes instead. Keep it well
+            above ``instance_ttl``.
         migration: Metadata schema policy (``auto`` or ``verify``).
         shutdown_timeout: Seconds ``close`` waits for in-flight work.
     """
@@ -292,6 +315,8 @@ class LifecycleConfig(FrozenModel):
     batch_size: int = Field(default=128, ge=1, le=10_000)
     max_concurrency: int = Field(default=4, ge=1, le=64)
     max_attempts: int = Field(default=3, ge=1, le=20)
+    retry_failed_after: float | None = Field(default=30.0, gt=0)
+    retry_failed_max_delay: float = Field(default=900.0, gt=0)
     unit_timeout: float = Field(default=600.0, gt=0)
     instance_ttl: float = Field(default=120.0, gt=0)
     lease_ttl: float = Field(default=120.0, gt=0)
@@ -302,6 +327,7 @@ class LifecycleConfig(FrozenModel):
     purge_after: float | None = Field(default=7 * 86_400.0, ge=0)
     max_versions: int | None = Field(default=10, ge=1)
     event_retention: float | None = Field(default=90 * 86_400.0, ge=0)
+    purge_log_retention: float = Field(default=86_400.0, gt=0)
     migration: Literal["auto", "verify"] = "auto"
     shutdown_timeout: float = Field(default=30.0, gt=0)
 

@@ -6,7 +6,7 @@ and readers trust it more when they see the section path, for example
 and expense policy alongside two short documents: an intranet FAQ that copied a policy
 paragraph, and a finance news item.
 
-## Wiring
+## How it works
 
 - **Structure.** The application passes the manual's outline as a `StructureRepresentation`
   of `StructureNodeInput` sections (`data/travel_policy.json`). The structure channel

@@ -1,0 +1,25 @@
+{
+  "skill_name": "retrievalloom-extend",
+  "queries": [
+    {"query": "implement a retrievalloom vector store backed by pgvector and run the contract tests", "should_trigger": true, "split": "train"},
+    {"query": "write a custom RerankerABC around our Cohere rerank endpoint", "should_trigger": true, "split": "train"},
+    {"query": "wrap our sentence-transformers model as a retrievalloom EmbeddingModelABC", "should_trigger": true, "split": "train"},
+    {"query": "store retrievalloom's metadata in MySQL by subclassing SQLAlchemyMetadataStore", "should_trigger": true, "split": "train"},
+    {"query": "add a Redis CacheABC implementation for retrievalloom and test it with CacheContract", "should_trigger": true, "split": "train"},
+    {"query": "retrievalloom raises TenantIsolationError: backend returned a hit of another scope from my custom index", "should_trigger": true, "split": "train"},
+    {"query": "my retrievalloom SparseIndexContract test fails on test_sealed_generation_mutability", "should_trigger": true, "split": "validation"},
+    {"query": "plug a SPLADE learned-sparse model into retrievalloom as the sparse index", "should_trigger": true, "split": "validation"},
+    {"query": "write a retrievalloom AccessPolicyABC that reads roles from our identity provider", "should_trigger": true, "split": "validation"},
+    {"query": "build an LLM graph extractor for retrievalloom that passes GraphExtractorContract", "should_trigger": true, "split": "validation"},
+    {"query": "add hybrid keyword and semantic search with retrievalloom to my RAG chatbot", "should_trigger": false, "split": "train"},
+    {"query": "retrievalloom results come back with status partial and index_missing after a restart", "should_trigger": false, "split": "train"},
+    {"query": "move our retrievalloom metadata from SQLite to PostgreSQL so two servers can share it", "should_trigger": false, "split": "train"},
+    {"query": "write a custom LangChain BaseRetriever for our search API", "should_trigger": false, "split": "train"},
+    {"query": "implement a new vector index type inside Qdrant's Rust codebase", "should_trigger": false, "split": "train"},
+    {"query": "write an agxai ProvenanceStore for DynamoDB", "should_trigger": false, "split": "train"},
+    {"query": "erase a user's documents from retrievalloom for a GDPR request", "should_trigger": false, "split": "validation"},
+    {"query": "my retrieval engine never uses the FlashRank reranker even though reranking is enabled", "should_trigger": false, "split": "validation"},
+    {"query": "train a cross-encoder reranker with sentence-transformers", "should_trigger": false, "split": "validation"},
+    {"query": "write pytest fixtures for an async SQLAlchemy repository", "should_trigger": false, "split": "validation"}
+  ]
+}

@@ -1,19 +1,23 @@
 # Troubleshooting
 
-Start with `result.status` and `result.warnings`. Every warning has a stable
-`code`, a `severity`, a `message` and `details`. `info` warnings do not change
-the status; `warning` and `error` make it `partial`.
+Find the warning or error you see, learn what causes it, and fix it. Start with
+`result.status` and `result.warnings`: RetrievalLoom reports everything it
+could not do instead of failing silently. Every warning has a stable `code`, a
+`severity`, a `message` and `details`. `info` warnings do not change the
+status; `warning` and `error` make it `partial`.
 
 ## Warning codes
 
+Look up the `code` of each warning:
+
 | Code | Severity | Cause | What to do |
 | --- | --- | --- | --- |
-| `method_unavailable` | info, or warning if the request asked for the method | The method has no backend, e.g. `dense` without an embedding model. | Configure the component, or disable the method in `IndexChannelConfig`. |
-| `reranker_unavailable` | warning | A request asked for reranking (`RetrievalExecutionConfig(reranking=True)`) but no reranker is available, or a reranker you supplied raised `BackendUnavailableError` (e.g. FlashRank model missing). The default FlashRank reranker is dropped at startup when its model is missing, so configured reranking is then skipped silently and results keep the RRF-fused order. | Put the FlashRank model in `RerankingConfig.model_dir` ([provision it](how-to/rerank-and-nli.md#provision-the-model-files)), or supply your own reranker. |
+| `method_unavailable` | info, or warning if the request asked for the method | The method has no backend, such as `dense` without an embedding model. | Configure the component, or disable the method in `IndexChannelConfig`. |
+| `reranker_unavailable` | warning | A request asked for reranking (`RetrievalExecutionConfig(reranking=True)`) but no reranker is available, or a reranker you supplied raised `BackendUnavailableError` (for example, the FlashRank model is missing). The default FlashRank reranker is dropped at startup when its model is missing, so configured reranking is then skipped silently and results keep the RRF-fused order. | Put the FlashRank model in `RerankingConfig.model_dir` ([provision it](how-to/rerank-and-nli.md#provision-the-model-files)), or supply your own reranker. |
 | `stage_skipped` | info or warning | NLI is enabled without an NLI model, or a method's generation is being replaced while the request starts. | Configure an NLI model or disable NLI. The replacement case clears on its own. |
-| `index_missing` | warning | No published generation for a method yet. Typical just after startup or for a new scope. | Wait for the lifecycle, call `run_lifecycle_once(scope)`, or set `LifecycleConfig(wait_for_rebuild=True)` so startup waits for the rebuild. See [Keep data on disk](how-to/durable-storage.md). |
-| `stale_coverage` | warning | The generation was built with another fingerprint (model or config changed). The method is skipped. | Wait for the rebuild the lifecycle starts, or `rebuild` the unit. |
-| `partial_coverage` | warning | Some active documents are not yet indexed by a method. The method runs. | Wait, or `backfill`. Check `status().coverage` for `failed` entries. |
+| `index_missing` | warning | No published generation for a method yet. Typical just after startup, for a new scope, or for a channel you just enabled. | Wait for background indexing, call `run_lifecycle_once(scope)`, or set `LifecycleConfig(wait_for_rebuild=True)` so startup waits for the rebuild. See [Keep data on disk](how-to/durable-storage.md). |
+| `stale_coverage` | warning | The generation was built with another fingerprint (model or config changed). The method is skipped. | Wait for the automatic rebuild, or call `rebuild` for the unit. |
+| `partial_coverage` | warning | Some active documents are not yet indexed by a method. The method runs. | Wait: failures with a retryable error, such as a backend outage, are retried automatically. Check `status().coverage` for `failed` entries and `backfill` after fixing a non-retryable cause. |
 | `backfill_scheduled` | info | `missing_index_policy="schedule_backfill"` or failed coverage queued a backfill. | None. |
 | `stale_document_version` | info, or warning when kept | Hits of a superseded document version were dropped, or kept with `allow_stale_versions=True`. | None; the new version appears once it is indexed. |
 | `filter_post_applied` | info | A method without filter pushdown (graph, structure) was filtered after the search. | None. Expect fewer results with selective filters. |
@@ -26,15 +30,16 @@ the status; `warning` and `error` make it `partial`.
 
 ## Errors
 
-All errors derive from `RetrievalLoomError` and carry `code`, `retryable` and
+Catch `RetrievalLoomError` to handle every library error in one place. All
+errors derive from `RetrievalLoomError` and carry `code`, `retryable` and
 `details`.
 
 | Error | Typical cause |
 | --- | --- |
-| `ConfigurationError` | Invalid configuration, e.g. a `vector_store` without an embedding model, or a selection that matches no unit. |
+| `ConfigurationError` | Invalid configuration, such as a `vector_store` without an embedding model, or a selection that matches no unit. |
 | `ValidationError` | Invalid input, or a request beyond a limit (`max_query_chars`, `max_top_k`, `max_filter_nodes`, `max_ingest_batch`). |
 | `EmbeddingValidationError` | The embedding model returned the wrong count, wrong dimensions, non-finite values or a zero vector. |
-| `ComponentContractError` | A component broke its contract, e.g. a reranker skipped an item. |
+| `ComponentContractError` | A component broke its contract; for example, a reranker skipped an item. |
 | `AccessDeniedError` | The access policy denied the operation. |
 | `TenantIsolationError` | Data of another scope reached a request. Never degraded. Report it as a bug. |
 | `CoverageError` | `missing_index_policy="fail"` and a method has no usable index. |
@@ -56,9 +61,23 @@ The offloader could not reserve memory or CPU capacity in time. Lower
 `OffloaderConfig.memory_per_job`, raise `admission_wait_timeout`, give the
 engine a larger `ResourceManager`, or reduce concurrency.
 
+**Dense results are `partial` after a vector-store outage.**
+Documents ingested during the outage have `failed` dense coverage. You do not
+need to act: once the store is back, the lifecycle retries them after
+`retry_failed_after` seconds, doubling the delay on each further failure, and
+the results become `complete` again. See
+[Recover from failures](concepts/lifecycle.md#recover-from-failures).
+
+**A newly enabled channel returns nothing.**
+The channel is still catching up on existing documents (`index_missing`).
+Open the engine with `LifecycleConfig(wait_for_rebuild=True)`, or call
+`backfill` and `wait_for`. See
+[Change channels on an existing store](concepts/channels.md#change-channels-on-an-existing-store).
+
 **Dense results disappear after changing the embedding model.**
-The old generation is stale for the new fingerprint (`stale_coverage`). The
-lifecycle builds a new generation; until then dense is skipped.
+The old index no longer matches the new model (`stale_coverage`). Background
+indexing builds a new index with the new model; until then the dense method is
+skipped.
 
 **A local Qdrant directory is locked.**
 Only one process can open a Qdrant local-mode directory. Close the other
@@ -72,12 +91,14 @@ the engine's last read, or immediately when it closes. See
 **The event loop stalls.**
 See [Keep the event loop responsive](how-to/event-loop-latency.md).
 
-## Logs
+## Read the logs
 
 RetrievalLoom logs with stable event names, for example
 `generation_published`, `retrieval_completed`, `reranker_unavailable` and
-`lifecycle_round_errors`. It is silent by default. To see the events, configure
+`lifecycle_round_errors`. When a background round fails as a whole,
+`lifecycle_tick_failed` reports the error's type (`error_type`), code
+(`error_code`), message (`error`) and `details`. It is silent by default. To see the events, configure
 structlog, or add a handler or level for the standard library `retrievalloom`
 logger (for example `logging.basicConfig(level=logging.INFO)`). See
-[Logging](../getting-started/installation.md#logging). Query text and document
+[See log output](../getting-started/installation.md#see-log-output). Query text and document
 content are not logged unless `EngineConfig(log_content=True)`.

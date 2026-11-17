@@ -4,7 +4,7 @@ In production you want one trace per request that shows what the application did
 the retrieval pipeline did inside it, plus logs you can join to that trace. The example
 produces both and exports the trace to Jaeger over OTLP.
 
-## Wiring
+## How it works
 
 - **OpenTelemetry.** A `TracerProvider` with `service.name=retrievalloom-example`. When
   `RL_EXAMPLES_OTLP_URL` is set, a `BatchSpanProcessor` with the OTLP/HTTP exporter sends
@@ -29,8 +29,8 @@ agxai events are instantaneous, so Jaeger shows them as zero-length spans and ma
 
 ## Requirements
 
-- The `agxai` extra and the `examples` dependency group (OpenTelemetry SDK and OTLP
-  exporter).
+- The `examples` dependency group (OpenTelemetry SDK and OTLP exporter). agxai is a
+  core dependency, so no extra is needed.
 - For export, the Jaeger service from `examples/compose.yaml` (UI on port 16686, OTLP/HTTP
   on 4318).
 

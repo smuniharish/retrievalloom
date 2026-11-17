@@ -1,0 +1,59 @@
+{
+  "skill_name": "retrievalloom",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Our support bot in app.py uses substring search, so it misses misspellings like 'eror E1042' and could show one customer another customer's articles. Replace the search with RetrievalLoom, keep `answer` working, cite the article URL, and add tests.",
+      "expected_output": "app.py ingests the articles into one engine with each tenant's own Scope, SourceDescriptor(uri=...) and E1042 in the keywords metadata, retrieves per tenant, checks result.status, and cites sources[0].source_uri; tests built from assets/test_retrieval_behavior.py prove the misspelled query finds E1042 and that globex never sees acme articles.",
+      "files": ["files/support_bot/app.py"],
+      "assertions": [
+        "Articles are ingested with DocumentInput, one Scope per tenant (Scope(tenant_id=article.tenant)), never a single shared scope with a tenant filter",
+        "Each document sets source=SourceDescriptor(uri=article.url) and the answer cites evidence.sources[0].source_uri",
+        "Error codes such as E1042 are stored under the keywords metadata field, or the fuzzy method is relied on explicitly",
+        "One engine is created and opened with async with (or managed open and close), not one per question",
+        "answer checks result.status or result.warnings and does not invent an answer when the result is empty",
+        "A test asserts that a query in the globex scope returns no acme article",
+        "No model is downloaded: reranking stays off or allow_download stays False"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Our retrieval service (app.py) returns status 'partial' with index_missing warnings for the first requests after every deploy, then it's fine. Why, and how do I fix it without making startup hang forever?",
+      "expected_output": "Explains that the keyword, fuzzy and sparse indexes are in memory and rebuilt from data_dir by the first background lifecycle round, so early requests skip them; fixes it with LifecycleConfig(wait_for_rebuild=True, rebuild_timeout=...) or run_lifecycle_once(scope) after opening, and keeps reporting partial results.",
+      "files": ["files/partial_results/app.py"],
+      "assertions": [
+        "Identifies that keyword, fuzzy and sparse indexes live in memory and are rebuilt from the metadata store after a restart",
+        "Identifies that with the default background lifecycle the rebuild runs after the engine opens, so early requests get index_missing",
+        "Proposes LifecycleConfig(wait_for_rebuild=True) with a rebuild_timeout, or awaiting engine.run_lifecycle_once(scope) after opening, or background=False",
+        "Passes lifecycle= to create_retrieval_engine, not to RetrievalEngine(...)",
+        "Does not suppress or ignore warnings to hide the partial status"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "We run RetrievalLoom on PostgreSQL with two app servers. A customer invoked GDPR erasure for documents doc-17 and doc-18 in tenant 'acme'. Write the function that erases them and tells us what was erased.",
+      "expected_output": "An async function that calls engine.purge([...], scope=Scope(tenant_id='acme')), returns or logs PurgeReport.purged and not_found, retries on retryable errors because purge is idempotent, and explains that the other server evicts the documents from its in-memory indexes at its next lifecycle round through the purge log.",
+      "files": [],
+      "assertions": [
+        "Uses engine.purge, not engine.delete, for erasure",
+        "Passes the tenant's Scope and, if an access policy is configured, a principal",
+        "Reports PurgeReport.purged and PurgeReport.not_found",
+        "Explains that other engines evict purged documents at their next lifecycle round, and that a foreground engine must call run_lifecycle_once",
+        "Treats a failed purge as safe to retry"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "We have a year of documents in RetrievalLoom with a data_dir and now want semantic search. I wrote an embedding adapter class already (my_embedding.Embedder). Turn on dense retrieval for the existing documents without re-ingesting, and make the deploy script wait until it's ready.",
+      "expected_output": "Passes Components(embedding=Embedder()) to the engine, then calls engine.backfill(scope=..., channels=['index'], methods=['dense']) and engine.wait_for(ref, timeout=...), checks the task state, and explains that requests skip dense with index_missing or partial_coverage until it finishes.",
+      "files": [],
+      "assertions": [
+        "Passes the embedding adapter as Components(embedding=...)",
+        "Does not re-ingest the documents",
+        "Calls engine.backfill with methods=['dense'] (or relies on the lifecycle) and engine.wait_for with a timeout",
+        "Checks LifecycleTaskResult.state and error instead of assuming success",
+        "Mentions that changing the embedding model later makes old vectors stale and triggers a rebuild"
+      ]
+    }
+  ]
+}

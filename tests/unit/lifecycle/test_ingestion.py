@@ -42,6 +42,7 @@ from retrievalloom.errors import BackendUnavailableError, ValidationError, Versi
 from retrievalloom.graph.normalizer import IdentityGraphNormalizer
 from retrievalloom.lifecycle import ingestion
 from retrievalloom.lifecycle.canonical import canonicalize, document_uid
+from retrievalloom.lifecycle.derivation import is_graph_marker
 from retrievalloom.lifecycle.ingestion import GraphDerivation, IngestionService
 from retrievalloom.storage.base import UnitKey
 from retrievalloom.storage.sqlite import SQLiteTransaction
@@ -467,7 +468,7 @@ async def test_delete_retries_and_reraises_version_conflicts(
     ingest = service(store)
     await ingest.ingest([text_doc("d1", "x")], SCOPE)
     calls = fail_transaction(
-        monkeypatch, "close_visibility", lambda: VersionConflictError("busy"), times=1
+        monkeypatch, "close_visibility_many", lambda: VersionConflictError("busy"), times=1
     )
     report = await ingest.delete(["d1"], SCOPE)
     assert calls[0] == 2
@@ -475,7 +476,7 @@ async def test_delete_retries_and_reraises_version_conflicts(
 
     await ingest.ingest([text_doc("d2", "y")], SCOPE)
     monkeypatch.undo()
-    fail_transaction(monkeypatch, "close_visibility", lambda: VersionConflictError("busy"))
+    fail_transaction(monkeypatch, "close_visibility_many", lambda: VersionConflictError("busy"))
     with pytest.raises(VersionConflictError):
         await ingest.delete(["d2"], SCOPE)
     monkeypatch.undo()
@@ -531,7 +532,7 @@ async def live_contributions(store: SQLiteMetadataStore, document_id: str) -> in
             c.object_id for c in await transaction.list_document_contributions(SCOPE.key, uid)
         ]
         current = await transaction.get_contributions(SCOPE.key, objects)
-    return len([c for c in current if c.document_uid == uid])
+    return len([c for c in current if c.document_uid == uid and not is_graph_marker(c.object_id)])
 
 
 def graph_doc(document_id: str, *names: str, text: str = "body") -> DocumentInput:

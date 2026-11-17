@@ -541,8 +541,6 @@ async def test_coverage_upsert_and_queries(store: SQLiteMetadataStore) -> None:
         rows = await tx.get_coverage(UNIT, [uid(SCOPE, "c1"), uid(SCOPE, "c2"), uid(SCOPE, "c3")])
         failed = await tx.list_coverage(UNIT, [CoverageState.FAILED, CoverageState.PENDING])
         ready = await tx.list_coverage(UNIT, [CoverageState.READY], limit=1)
-        missing = await tx.documents_missing_coverage(UNIT)
-        missing_limited = await tx.documents_missing_coverage(UNIT, limit=0)
         shared = await tx.coverage_counts(SCOPE.key, [""])
         everything = await tx.coverage_counts(SCOPE.key, ["", "inst"])
         assert dict(await tx.coverage_counts(SCOPE.key, [])) == {}
@@ -552,8 +550,6 @@ async def test_coverage_upsert_and_queries(store: SQLiteMetadataStore) -> None:
     assert rows[uid(SCOPE, "c2")].last_error == ERROR
     assert [item.document_uid for item in failed] == [uid(SCOPE, "c2")]
     assert [item.document_uid for item in ready] == [uid(SCOPE, "c1")]
-    assert [item.document_id for item in missing] == ["c3"]
-    assert list(missing_limited) == []
     assert dict(shared) == {
         "index.keyword": {"ready": 1, "failed": 1},
         "index.dense": {"pending": 1},

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import math
 from typing import TYPE_CHECKING, Any
@@ -11,7 +10,9 @@ import pytest
 
 from retrievalloom.contracts.models import KeywordEntry
 from retrievalloom.domain.inputs import Scope
+from retrievalloom.domain.records import DocumentState
 from retrievalloom.errors import ConfigurationError, EmbeddingValidationError
+from retrievalloom.index import text as text_module
 from retrievalloom.index.embedding import EmbeddingValidator, check_vectors
 from retrievalloom.index.text import (
     MetadataKeywordDictionary,
@@ -19,14 +20,19 @@ from retrievalloom.index.text import (
     SimpleTokenizer,
     StaticKeywordDictionary,
     fold,
+    track_keyword_changes,
 )
+from retrievalloom.storage.sqlite import SQLiteMetadataStore
 from tests.fakes import HashEmbedding
+from tests.unit.storage.factories import document
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Sequence
 
     from retrievalloom.contracts.component import ComponentContext
+    from retrievalloom.domain.records import DocumentRecord
     from retrievalloom.runtime.offloader import Offloader
+    from retrievalloom.storage.base import KeywordDictionaryState
 
 SCOPE = Scope(tenant_id="tenant-a")
 
@@ -167,85 +173,138 @@ async def test_static_dictionary_returns_entries_for_every_scope() -> None:
     assert await dictionary.entries(Scope(tenant_id="other")) == entries
     assert dictionary.info.implementation == "static"
     assert dictionary.info != StaticKeywordDictionary().info
+    revision = await dictionary.revision(SCOPE)
+    assert revision == await StaticKeywordDictionary(entries).revision(SCOPE)
+    assert revision != await StaticKeywordDictionary().revision(SCOPE)
 
 
-class _Document:
-    def __init__(self, document_id: str, metadata: dict[str, Any]) -> None:
-        self.document_id = document_id
-        self.metadata = metadata
+@pytest.fixture
+async def store() -> AsyncIterator[SQLiteMetadataStore]:
+    component = SQLiteMetadataStore()
+    await component.initialize()
+    await component.migrate()
+    async with component.transaction(write=True) as tx:
+        await tx.ensure_scope(SCOPE)
+    try:
+        yield component
+    finally:
+        await component.close()
 
 
-class _Transaction:
-    def __init__(self, store: FakeStore) -> None:
-        self._store = store
-
-    async def list_document_metadata(
-        self, scope_key: str, *, state: Any, after_id: str | None, limit: int
-    ) -> list[tuple[str, dict[str, Any]]]:
-        self._store.calls.append((scope_key, str(state), after_id, limit))
-        rows = sorted(self._store.documents, key=lambda document: document.document_id)
-        rows = [row for row in rows if after_id is None or row.document_id > after_id]
-        return [(row.document_id, row.metadata) for row in rows[:limit]]
+def record(document_id: str, metadata: dict[str, Any], **values: Any) -> DocumentRecord:
+    return document(SCOPE, document_id, metadata=metadata, **values)
 
 
-class FakeStore:
-    """Paged ``list_document_metadata`` over an in-memory list of active documents."""
-
-    def __init__(self, documents: list[_Document]) -> None:
-        self.documents = documents
-        self.calls: list[tuple[str, str, str | None, int]] = []
-
-    @contextlib.asynccontextmanager
-    async def transaction(self, scope: Scope, *, write: bool) -> AsyncIterator[_Transaction]:
-        assert write is False
-        yield _Transaction(self)
+async def put(store: SQLiteMetadataStore, *records: DocumentRecord) -> None:
+    async with store.transaction(SCOPE, write=True) as tx:
+        await tx.put_documents([(item, None) for item in records])
 
 
-def with_store(context: ComponentContext, store: FakeStore) -> ComponentContext:
-    return dataclasses.replace(context, metadata_store=store)
+async def bound(
+    context: ComponentContext, store: SQLiteMetadataStore, **options: Any
+) -> MetadataKeywordDictionary:
+    dictionary = MetadataKeywordDictionary(**options)
+    await dictionary.initialize(dataclasses.replace(context, metadata_store=store))
+    return dictionary
 
 
-async def test_metadata_dictionary_collects_strings_and_lists(context: ComponentContext) -> None:
-    store = FakeStore(
-        [
-            _Document("d1", {"keywords": ["Python", "  asyncio ", "", 3], "tags": "Rust"}),
-            _Document("d2", {"keywords": "PYTHON", "tags": [None, "uv"]}),
-            _Document("d3", {"other": "ignored"}),
-        ]
+async def test_metadata_dictionary_collects_strings_and_lists(
+    context: ComponentContext, store: SQLiteMetadataStore
+) -> None:
+    await put(
+        store,
+        record("d1", {"keywords": ["Python", "  asyncio ", "", 3], "tags": "Rust"}),
+        record("d2", {"keywords": "PYTHON", "tags": [None, "uv"]}),
+        record("d3", {"other": "ignored"}),
+        record("d4", {"keywords": "gone"}, state=DocumentState.DELETED),
     )
-    dictionary = MetadataKeywordDictionary(
+    dictionary = await bound(
+        context,
+        store,
         fields=("keywords", "tags"),
         static_entries=[KeywordEntry(canonical="Python", aliases=("py",))],
     )
-    await dictionary.initialize(with_store(context, store))
     entries = await dictionary.entries(SCOPE)
     # Static entries win on folded collisions; output is sorted by folded form.
     assert [entry.canonical for entry in entries] == ["asyncio", "Python", "Rust", "uv"]
     assert entries[1].aliases == ("py",)
-    assert store.calls == [(SCOPE.key, "active", None, 5000)]
+    plain = await bound(context, store)
+    # Without a static entry the smallest surface form is canonical.
+    assert [entry.canonical for entry in await plain.entries(SCOPE)] == ["asyncio", "PYTHON"]
+    revision = await dictionary.revision(SCOPE)
+    assert revision.endswith(":1")
+    assert revision != await plain.revision(SCOPE)
+    async with store.transaction(SCOPE, write=False) as tx:
+        assert len(await tx.list_keyword_dictionaries(SCOPE.key)) == 2
 
 
-async def test_metadata_dictionary_pages_through_documents(context: ComponentContext) -> None:
-    documents = [_Document(f"d{index:04d}", {"keywords": f"kw{index}"}) for index in range(5001)]
-    store = FakeStore(documents)
-    dictionary = MetadataKeywordDictionary()
-    await dictionary.initialize(with_store(context, store))
-    entries = await dictionary.entries(SCOPE)
-    assert len(entries) == 5001
-    assert [call[2] for call in store.calls] == [None, "d4999"]
+async def test_metadata_dictionary_pages_through_documents(
+    context: ComponentContext, store: SQLiteMetadataStore
+) -> None:
+    await put(
+        store, *[record(f"d{index:04d}", {"keywords": f"kw{index}"}) for index in range(5001)]
+    )
+    dictionary = await bound(context, store)
+    assert len(await dictionary.entries(SCOPE)) == 5001
+
+
+async def test_metadata_dictionary_registers_once_under_a_race(
+    context: ComponentContext, store: SQLiteMetadataStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await put(store, record("d1", {"keywords": "a"}))
+    original = text_module._find
+    calls: list[str] = []
+
+    def stale_first_read(states: Sequence[KeywordDictionaryState], dictionary_id: str) -> Any:
+        calls.append(dictionary_id)
+        return None if len(calls) == 1 else original(states, dictionary_id)
+
+    first = await bound(context, store)
+    await first.revision(SCOPE)
+    monkeypatch.setattr(text_module, "_find", stale_first_read)
+    assert await (await bound(context, store)).revision(SCOPE) == await first.revision(SCOPE)
+
+
+async def test_keyword_changes_adjust_terms_and_revision(
+    context: ComponentContext, store: SQLiteMetadataStore
+) -> None:
+    old = record("d1", {"keywords": ["a", "shared"]})
+    other = record("d2", {"keywords": "shared"})
+    await put(store, old, other)
+    dictionary = await bound(context, store)
+    await dictionary.entries(SCOPE)
+    initial = await dictionary.revision(SCOPE)
+    renamed = old.model_copy(update={"metadata": {"keywords": ["b", "shared"]}})
+    gone = other.model_copy(update={"state": DocumentState.DELETED})
+    async with store.transaction(SCOPE, write=True) as tx:
+        await track_keyword_changes(tx, SCOPE.key, [])
+        await track_keyword_changes(tx, SCOPE.key, [(old, renamed), (other, gone)])
+    assert [entry.canonical for entry in await dictionary.entries(SCOPE)] == ["b", "shared"]
+    changed = await dictionary.revision(SCOPE)
+    assert changed != initial
+    async with store.transaction(SCOPE, write=True) as tx:
+        await track_keyword_changes(tx, SCOPE.key, [(renamed, renamed)])
+        await track_keyword_changes(tx, SCOPE.key, [(None, record("d3", {"keywords": "b"}))])
+    # Count-only changes keep the revision.
+    assert await dictionary.revision(SCOPE) == changed
+    async with store.transaction(SCOPE, write=True) as tx:
+        await track_keyword_changes(tx, SCOPE.key, [(gone, other)])
+    assert await dictionary.revision(SCOPE) == changed
+    assert [entry.canonical for entry in await dictionary.entries(SCOPE)] == ["b", "shared"]
 
 
 async def test_metadata_dictionary_without_store_or_fields_uses_static_only(
-    context: ComponentContext,
+    context: ComponentContext, store: SQLiteMetadataStore
 ) -> None:
     static = [KeywordEntry(canonical="b"), KeywordEntry(canonical="A")]
     unbound = MetadataKeywordDictionary(static_entries=static)
     assert [entry.canonical for entry in await unbound.entries(SCOPE)] == ["A", "b"]
-    store = FakeStore([_Document("d1", {"keywords": "x"})])
-    no_fields = MetadataKeywordDictionary(fields=(), static_entries=static)
-    await no_fields.initialize(with_store(context, store))
+    await put(store, record("d1", {"keywords": "x"}))
+    no_fields = await bound(context, store, fields=(), static_entries=static)
     assert [entry.canonical for entry in await no_fields.entries(SCOPE)] == ["A", "b"]
-    assert store.calls == []
+    assert await no_fields.revision(SCOPE) == await unbound.revision(SCOPE)
+    async with store.transaction(SCOPE, write=False) as tx:
+        assert list(await tx.list_keyword_dictionaries(SCOPE.key)) == []
     assert no_fields.info != unbound.info
 
 

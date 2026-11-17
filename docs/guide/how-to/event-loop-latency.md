@@ -1,7 +1,9 @@
 # Keep the event loop responsive
 
-RetrievalLoom never runs blocking work on the event loop. Your application
-can still stall it. This page lists the causes and fixes.
+Keep response times low under load. RetrievalLoom never runs blocking work on
+the event loop, but your own components and Python's garbage collector can
+still stall it. This page lists each cause, its fix, and how to measure the
+result.
 
 ## Offload blocking calls in your components
 
@@ -23,7 +25,7 @@ every request on the loop until it returns. See
 - `TenantPolicy.max_concurrent_requests` and `max_concurrent_cpu_jobs` keep
   one tenant from taking every slot.
 
-## Garbage-collector pauses on large heaps
+## Avoid garbage-collector pauses on large heaps
 
 Python's cyclic garbage collector runs on the thread that triggers it, often
 the event loop thread. A full collection walks every tracked object. With a
@@ -75,3 +77,9 @@ async def worst_lag(duration: float, interval: float = 0.01) -> float:
 Run it as a task next to your workload. A worst lag in the tens of
 milliseconds is normal; hundreds of milliseconds point to a blocking call or a
 collector pause.
+
+## Next steps
+
+- See the measured effect of each setting in
+  [Offloading and admission](../concepts/offloading.md#capping-cpu-bound-jobs).
+- Trace slow requests with the [Jaeger example](../../examples/observability-jaeger.md).

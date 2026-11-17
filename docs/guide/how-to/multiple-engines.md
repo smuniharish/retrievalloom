@@ -1,6 +1,8 @@
 # Run several engines on one store
 
-Several engines, in one process or many, can share indexes. They must share:
+Scale out by running several engines, in one process or many, against the same
+documents. Durable indexes such as vectors are built once and shared, and every
+engine sees the others' writes. The engines must share:
 
 - one metadata store (for example the same SQLite file for engines on one
   host, or a [shared PostgreSQL store](durable-storage.md#a-shared-postgresql-store)
@@ -8,7 +10,7 @@ Several engines, in one process or many, can share indexes. They must share:
 - the same durable backend location (for example one Qdrant server and
   `collection_prefix`).
 
-Each engine then sees the others' writes, generations and lifecycle tasks.
+Configure every engine the same way:
 
 ```python
 from retrievalloom import Components, RetrievalEngine
@@ -33,6 +35,9 @@ that engine.
 
 ## What is shared and what is not
 
+Durable indexes are shared; in-memory indexes are rebuilt by each engine from
+the shared metadata:
+
 | Unit | Shared between engines |
 | --- | --- |
 | Dense (Qdrant server, or another durable store) | Yes. One generation, built once. |
@@ -46,7 +51,8 @@ renewed by a heartbeat every round).
 
 ## Reader leases
 
-A rebuild publishes a new generation and retires the old one. The old one must
+A search on one engine never loses its index because another engine rebuilt
+it. A rebuild publishes a new generation and retires the old one. The old one must
 not be dropped while another engine still reads from it. Durable reader leases
 guarantee this:
 
@@ -68,7 +74,7 @@ Choose `lease_ttl` longer than your longest request. A crashed engine delays
 the drop of a retired generation by at most `lease_ttl`; its registration
 and in-memory rows are purged after `instance_ttl`.
 
-## Who runs the lifecycle
+## Who runs background indexing
 
 Every engine with `background=True` (the default) runs lifecycle rounds.
 Generation pointers are switched with compare-and-swap in the metadata store,
@@ -81,4 +87,10 @@ least every `instance_ttl`. The round renews the engine's registration, and
 indexes documents written by other engines into its in-memory indexes.
 Without it, those documents are missing from its keyword, fuzzy and sparse
 results, and other engines purge its in-memory rows once its registration
-expires.
+expires. The round also evicts documents other engines purged from its
+in-memory indexes (see [Erasure and retention](../../security.md#erasure-and-retention)).
+
+## Next steps
+
+- Choose a shared metadata store in [Keep data on disk](durable-storage.md).
+- Learn how leases protect searches in [Generations and coverage](../concepts/lifecycle.md#reader-leases).

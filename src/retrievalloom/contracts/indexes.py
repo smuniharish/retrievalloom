@@ -79,7 +79,8 @@ class GenerationalIndexABC(ComponentABC):
 
     All methods are idempotent by ``(generation_id, object_id)`` and must reject data
     of another scope. Immutable backends accept ``write`` only before ``seal``;
-    ``remove`` is always accepted (tombstones).
+    ``remove`` is always accepted, also after ``seal``, and must make the removed
+    objects unsearchable at once (erasure relies on it).
     """
 
     @property
@@ -133,9 +134,15 @@ class FuzzyQuery(FrozenModel):
 
 
 class SparseQuery(FrozenModel):
-    """Sparse (BM25) query tokens."""
+    """Sparse query: the engine tokenizer's tokens plus the raw query text.
+
+    Term-statistics indexes (BM25) score ``tokens``. Learned-sparse indexes, which run
+    their own model tokenizer, encode ``text`` instead; it is empty only when a caller
+    builds a query from tokens alone.
+    """
 
     tokens: tuple[str, ...]
+    text: str = ""
 
 
 class KeywordIndexABC(GenerationalIndexABC):

@@ -1,8 +1,10 @@
 # agxai
 
-[agxai](https://pypi.org/project/agxai/) records what an AI application did and
-why. RetrievalLoom can record its retrievals, ingestions and deletions into an
-agxai run you control. The mapping is one way: RetrievalLoom to agxai.
+Keep an audit trail of what your AI application searched for and which
+document versions it used. [agxai](https://pypi.org/project/agxai/) records
+what an AI application did and why. RetrievalLoom records its searches,
+ingestions and deletions into an agxai run you control, so you can explain any
+answer later. Records flow one way, from RetrievalLoom to agxai.
 
 ## Enable it
 
@@ -59,7 +61,7 @@ components = Components(provenance_recorder=recorder)
 `run_provider` returns the run to record into; when it returns `None`, the
 runtime's current run is used. Without a run nothing is recorded.
 
-## Tenant isolation and failures
+## Handle tenant mismatches and failures
 
 If the run's tenant differs from the request's scope tenant, recording raises
 `TenantIsolationError`, and the operation fails. Other recording errors add a
@@ -67,4 +69,7 @@ If the run's tenant differs from the request's scope tenant, recording raises
 `RetrievalConfig.fail_on_recording_error=True`, in which case they raise
 `ProvenanceError`.
 
-See the [agxai provenance example](../examples/agxai-provenance.md).
+## Next steps
+
+- Run the [agxai provenance example](../examples/agxai-provenance.md).
+- Read what each result records in [Evidence and provenance](../guide/concepts/evidence.md).
