@@ -1,0 +1,20 @@
+sequenceDiagram
+    autonumber
+    participant App as Your application
+    participant Engine as RetrievalEngine
+    participant Ingest as IngestionService
+    participant Store as Metadata store
+    participant Round as Lifecycle round
+    participant Units as Index units
+
+    App->>Engine: ingest(documents, scope)
+    Engine->>Engine: authorize · validate limits
+    Engine->>Ingest: documents
+    Ingest->>Ingest: canonicalize · content hash<br/>derive chunks, sections, graph contributions
+    Ingest->>Store: write transaction per chunk of up to 200 documents<br/>document · version · representations · objects · event
+    Note over Ingest,Store: Identical content is reported as unchanged,<br/>a redelivered event as replayed.
+    Engine->>Round: run a round for the scope
+    Round->>Store: pending coverage since the unit watermark
+    Round->>Units: write new objects, remove superseded ones<br/>(or build and publish a new generation)
+    Round->>Store: coverage ready · version visible
+    Engine-->>App: IngestReport<br/>created · updated · unchanged · revived · replayed

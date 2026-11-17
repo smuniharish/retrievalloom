@@ -26,7 +26,8 @@ it helps reviewers understand and validate your change quickly.
 - [ ] `uv run ruff check .` and `uv run ruff format --check .` pass.
 - [ ] `uv run pyrefly check` passes.
 - [ ] `uv run pytest -m "not live" --cov=retrievalloom --cov-branch` passes with 100% coverage.
-- [ ] `uv run zensical build --strict` and `uv run python scripts/check_site_links.py` pass.
+- [ ] `uv run zensical build --strict` and `uv run python scripts/check_site_links.py` pass, and diagrams were re-rendered if
+      a `diagrams/*.mmd` source changed (`node scripts/render-diagrams.mjs --check` passes).
 - [ ] Schema changes come with a new Alembic migration and its tests.
 - [ ] Relevant docs under `docs/` were updated (if this changes public API,
       configuration, or behavior).

@@ -12,6 +12,8 @@ the [User guide](../guide/index.md).
 | [Retrieval execution](retrieval.md) | Modules and data flow of one `retrieve` call |
 | [Concurrency and isolation](concurrency.md) | Event loop, offloading, limits, tenant isolation |
 
+![RetrievalLoom architecture: your application ingests documents and sends queries to the engine, which keeps the metadata store and the index, graph and structure channels in step and returns ranked, cited evidence](../assets/diagrams/architecture-overview.png){ .diagram }
+
 ## Design rules
 
 - **Async only.** Every public operation is a coroutine. Blocking work runs in

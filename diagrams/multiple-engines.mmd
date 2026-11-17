@@ -1,0 +1,25 @@
+flowchart LR
+    classDef app fill:#ecf8f1,stroke:#2f8f5b,color:#0f2547
+    classDef core fill:#eef4ff,stroke:#3567c7,color:#0f2547
+    classDef provider fill:#fff7e8,stroke:#c98a12,color:#0f2547
+
+    subgraph HostA["Host A"]
+        engineA["RetrievalEngine<br/>in-memory keyword · fuzzy · sparse"]:::core
+    end
+
+    subgraph HostB["Host B"]
+        engineB["RetrievalEngine<br/>in-memory keyword · fuzzy · sparse"]:::core
+    end
+
+    postgres[("PostgreSQL metadata store<br/>documents · coverage · generations<br/>purge log · reader leases · heartbeats")]:::provider
+    qdrant[("Qdrant server<br/>shared dense generations")]:::provider
+    graphdb[("Graph database server<br/>your GraphStoreABC")]:::provider
+
+    engineA <-- "per-scope advisory lock<br/>pointer compare-and-swap" --> postgres
+    engineB <-- "per-scope advisory lock<br/>pointer compare-and-swap" --> postgres
+    engineA --> qdrant
+    engineB --> qdrant
+    engineA --> graphdb
+    engineB --> graphdb
+    postgres -. "purge log: evict erased objects" .-> engineA
+    postgres -. "purge log: evict erased objects" .-> engineB

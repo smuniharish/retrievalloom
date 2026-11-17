@@ -1,0 +1,20 @@
+flowchart LR
+    classDef app fill:#ecf8f1,stroke:#2f8f5b,color:#0f2547
+    classDef core fill:#eef4ff,stroke:#3567c7,color:#0f2547
+    classDef provider fill:#fff7e8,stroke:#c98a12,color:#0f2547
+
+    result["RetrievalResult<br/>status · warnings · timings"]:::app
+    evidence["Evidence<br/>display_text · score · ScoreCard"]:::core
+    segments["Segments<br/>one per member passage"]:::core
+    source["SourceReference<br/>document_id · document_version<br/>span · pages · section_path · source_uri"]:::provider
+    provenance["Provenance"]:::core
+    hits["RetrievalHit per method<br/>method key · raw score · rank<br/>match details · graph path"]:::provider
+    trail["Stage trail<br/>method_fusion · dedup · channel_fusion<br/>rerank · nli · consolidation"]:::provider
+    relations["Relations<br/>span_overlap · same_section · contradicts<br/>NLI summary"]:::provider
+
+    result -- "evidence, best first" --> evidence
+    evidence --> segments --> source
+    evidence --> provenance
+    provenance --> hits
+    provenance --> trail
+    evidence --> relations

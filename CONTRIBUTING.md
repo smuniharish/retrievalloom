@@ -59,6 +59,23 @@ uv run zensical build --strict
 uv run python scripts/check_site_links.py
 ```
 
+Diagrams are Mermaid sources under [`diagrams/`](diagrams), rendered to PNG
+under `docs/assets/diagrams/` with Mermaid CLI 12.2.0 and the shared theme in
+`diagrams/mermaid-config.json`. Install the CLI globally; it needs Node.js
+22.13 or later. `--allow-scripts=puppeteer` lets Puppeteer download the
+headless browser the CLI renders with. To use a browser you already have, set
+`PUPPETEER_EXECUTABLE_PATH` to its executable, for example Chrome or Edge.
+
+```bash
+npm install --global --allow-scripts=puppeteer @mermaid-js/mermaid-cli@12.2.0
+node scripts/render-diagrams.mjs
+node scripts/render-diagrams.mjs --check
+```
+
+Commit a changed diagram source together with its rendered image and the
+updated `docs/assets/diagrams/manifest.json`. The check needs only Node.js and
+fails when an image is missing, stale or has no source.
+
 ## Open a pull request
 
 A pull request is ready for review when it meets these points:

@@ -1,0 +1,51 @@
+flowchart TB
+    classDef app fill:#ecf8f1,stroke:#2f8f5b,color:#0f2547
+    classDef core fill:#eef4ff,stroke:#3567c7,color:#0f2547
+    classDef provider fill:#fff7e8,stroke:#c98a12,color:#0f2547
+
+    request["engine.retrieve(query, scope)"]:::app
+
+    subgraph Prepare["1 · Prepare"]
+        direction LR
+        authorize["Authorize<br/>access policy · row filter"]:::core
+        plan["Plan<br/>limits · methods · rerank · NLI"]:::core
+        snapshot["Snapshot<br/>published generation per method<br/>reader leases"]:::core
+        cache["Cache lookup<br/>a hit returns at once"]:::core
+        authorize --> plan --> snapshot --> cache
+    end
+
+    subgraph Search["2 · Search: methods run concurrently, each within method_timeout"]
+        direction LR
+        keyword["index.keyword"]:::provider
+        fuzzy["index.fuzzy"]:::provider
+        sparse["index.sparse"]:::provider
+        dense["index.dense"]:::provider
+        graphch["graph.graph"]:::provider
+        structure["structure.structure"]:::provider
+    end
+
+    subgraph Rank["3 · Rank"]
+        direction LR
+        methodfusion["Method fusion<br/>index-channel methods"]:::core
+        candidates["Candidates<br/>drop deleted, invisible,<br/>superseded and filtered"]:::core
+        dedup["Deduplication"]:::core
+        channelfusion["Channel fusion"]:::core
+        methodfusion --> candidates --> dedup --> channelfusion
+    end
+
+    subgraph Refine["4 · Refine"]
+        direction LR
+        rerank["Rerank<br/>top rerank_k"]:::core
+        judge["NLI<br/>top nli_k"]:::core
+        consolidate["Consolidate · validate<br/>top_k items · contradictions"]:::core
+        record["Cache · record provenance<br/>metrics · release snapshot"]:::core
+        rerank --> judge --> consolidate --> record
+    end
+
+    result["RetrievalResult<br/>status · evidence · warnings · timings"]:::app
+
+    request --> Prepare
+    Prepare -- "cache miss" --> Search
+    Search --> Rank
+    Rank --> Refine
+    Refine --> result

@@ -20,11 +20,7 @@ A *generation* is one complete build of one index for one scope. Building a
 new generation next to the current one lets you change models or rebuild an
 index without interrupting searches. Its state moves through:
 
-```text
-building -> active -> retiring -> retired
-    \-> failed            (build error)
-    \-> abandoned         (builder engine instance expired)
-```
+![Generation states: building becomes active when published, failed on a build error or a moved pointer, or abandoned when its builder expires; an active generation becomes retiring when a newer one is published, then retired](../../assets/diagrams/generation-states.png){ .diagram }
 
 Each scope and unit has a *pointer* to its active generation. A new generation
 is published by moving the pointer with a compare-and-swap in one metadata
@@ -56,6 +52,8 @@ as warnings (see [Retrieval warnings](#what-retrieval-sees)).
 
 Indexing runs in *rounds*. Each round compares every unit with the metadata
 store and does one of two things:
+
+![One ingest call: the engine authorizes and validates, the ingestion service canonicalizes and writes documents, versions, objects and events in batched transactions, then a lifecycle round updates the index units and marks coverage ready before the report returns](../../assets/diagrams/ingestion-flow.png){ .diagram }
 
 - **Incremental update.** If the unit already has a generation with the
   current fingerprint and its backend can be changed in place, the new and
@@ -133,6 +131,8 @@ makes a document a *tombstone*: it is hidden from retrieval at once,
 its objects and graph contributions are retracted, and the next rounds remove
 its objects from the indexes and mark its coverage `deleted`. The metadata
 store still holds its versions, representations, events and objects.
+
+![Document lifecycle: ingest creates the current version and changed content adds versions; delete makes a hidden tombstone that a new ingest revives; purge, or purge_after once every unit marked it deleted, erases every row and other engines evict it through the purge log](../../assets/diagrams/document-lifecycle.png){ .diagram }
 
 `purge(ids, scope=...)` erases documents physically. It tombstones them first
 when needed, then works in batches of up to 500 documents:

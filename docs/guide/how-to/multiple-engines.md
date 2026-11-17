@@ -35,6 +35,8 @@ that engine.
 
 ## What is shared and what is not
 
+![Two hosts share one PostgreSQL metadata store under per-scope advisory locks, one Qdrant server and one graph database server; each keeps its own in-memory keyword, fuzzy and sparse indexes and evicts erased objects through the purge log](../../assets/diagrams/multiple-engines.png){ .diagram }
+
 Durable indexes are shared; in-memory indexes are rebuilt by each engine from
 the shared metadata:
 

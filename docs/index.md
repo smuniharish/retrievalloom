@@ -77,6 +77,14 @@ other, and records where every result came from.
 
 </div>
 
+    ## How it works
+
+    Your application sends documents and queries. The engine stores every document
+    version in the metadata store, keeps each channel's indexes in step with it,
+    and answers a query by searching one consistent snapshot of every channel.
+
+    ![RetrievalLoom architecture: your application ingests documents and sends queries to the engine, which keeps the metadata store and the index, graph and structure channels in step and returns ranked, cited evidence](assets/diagrams/architecture-overview.png){ .diagram }
+
 ## Thirty-second tour
 
 === "pip"

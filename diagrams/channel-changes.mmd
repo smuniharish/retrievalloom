@@ -1,0 +1,21 @@
+flowchart LR
+    classDef app fill:#ecf8f1,stroke:#2f8f5b,color:#0f2547
+    classDef core fill:#eef4ff,stroke:#3567c7,color:#0f2547
+    classDef provider fill:#fff7e8,stroke:#c98a12,color:#0f2547
+
+    running["Engine running<br/>channels: index"]:::app
+    reopen["close(), then open<br/>on the same store with<br/>channels: index + structure"]:::app
+    pending["New unit structure.structure<br/>pending coverage for every<br/>stored document"]:::core
+    startup{"auto_rebuild_ephemeral?"}:::core
+    foreground["Built before open() returns<br/>background=False or<br/>wait_for_rebuild=True"]:::core
+    background["Built in the first<br/>background round"]:::core
+    explicit["Not built at startup<br/>call backfill(), then wait_for()"]:::core
+    partial["Until then: status partial,<br/>index_missing names the method"]:::provider
+    ready["Coverage ready<br/>structure answers requests"]:::app
+
+    running --> reopen --> pending --> startup
+    startup -- "yes · foreground" --> foreground --> ready
+    startup -- "yes · background" --> background --> ready
+    startup -- "no" --> explicit --> ready
+    background -.-> partial
+    explicit -.-> partial

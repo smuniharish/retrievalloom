@@ -23,6 +23,10 @@ list. Every result tells you which document, which version and which passage it
 came from. It runs inside your application: there is no separate service to
 deploy.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/smuniharish/retrievalloom/main/docs/assets/diagrams/architecture-overview.png" alt="RetrievalLoom architecture: your application ingests documents and sends queries to the engine, which keeps the metadata store and the index, graph and structure channels in step and returns ranked, cited evidence" width="720">
+</p>
+
 ## Why RetrievalLoom
 
 Picture a support assistant for a software product. In one hour it has to

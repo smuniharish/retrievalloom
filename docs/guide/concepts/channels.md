@@ -31,6 +31,8 @@ Method keys in results have the form `<channel>.<method>`, for example
 `index.sparse`. Graph and structure keys are `graph.graph` and
 `structure.structure`.
 
+![Each query reaches every enabled method; the four index-channel methods are fused first, then the index, graph and structure channels are fused into one ranked list, both with reciprocal rank fusion by default](../../assets/diagrams/channels-and-fusion.png){ .diagram }
+
 ## Index channel
 
 The index channel searches the chunks of each document's `text` or `chunks`
@@ -131,6 +133,8 @@ re-ingesting anything. Channels are fixed while an engine is open, so you change
 them by closing the engine and opening it again with a new `ChannelsConfig` on
 the same durable store: the same `data_dir`, or the same metadata store and
 backends.
+
+![Adding the structure channel: reopen on the same store, the new unit starts with pending coverage, and it is built before open returns, in the first background round, or on an explicit backfill; until then results are partial with index_missing](../../assets/diagrams/channel-changes.png){ .diagram }
 
 ```python
 from retrievalloom import (

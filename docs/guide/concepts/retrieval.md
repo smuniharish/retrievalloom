@@ -8,6 +8,8 @@ search still returns what it found and tells you what was skipped.
 
 ## Stages
 
+![The four phases of one retrieve call: prepare (authorize, plan, snapshot, cache lookup), search (all methods concurrently), rank (method fusion, candidates, deduplication, channel fusion) and refine (rerank, NLI, consolidation, recording)](../../assets/diagrams/retrieval-pipeline.png){ .diagram }
+
 `engine.retrieve(query, scope=...)` runs these stages in order:
 
 1. **Authorize.** The access policy authorizes the call and may add a

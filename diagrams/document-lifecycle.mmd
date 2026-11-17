@@ -1,0 +1,19 @@
+stateDiagram-v2
+    direction LR
+    [*] --> Current: ingest<br/>version 1
+    Current --> Current: ingest changed content<br/>new version, older objects retired
+    Current --> Tombstone: delete<br/>hidden at once
+    Tombstone --> Current: ingest again<br/>revived
+    Tombstone --> Erased: purge(ids), or purge_after<br/>once every unit marked it deleted
+    Current --> Erased: purge(ids)
+    Erased --> [*]
+
+    note right of Current
+        Retention keeps the newest max_versions
+        versions and events for event_retention.
+    end note
+    note right of Erased
+        Every metadata row is deleted.
+        Other engines evict the objects
+        through the purge log.
+    end note

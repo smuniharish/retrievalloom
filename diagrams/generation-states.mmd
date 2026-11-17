@@ -1,0 +1,12 @@
+stateDiagram-v2
+    direction LR
+    [*] --> building: full build starts
+    building --> active: published<br/>pointer compare-and-swap
+    building --> failed: build error<br/>or pointer moved
+    building --> abandoned: builder instance<br/>expired
+    active --> active: incremental<br/>updates
+    active --> retiring: newer generation<br/>published
+    retiring --> retired: no readers, no leases,<br/>generation_retention passed
+    retired --> [*]
+    failed --> [*]
+    abandoned --> [*]

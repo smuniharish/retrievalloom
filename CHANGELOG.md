@@ -123,6 +123,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1,869.
 - `scripts/scale.py` measures index memory and restart time at a corpus size;
   results to 100,000 documents are in the benchmarks page.
+- Architecture diagrams in the README and documentation: overview, retrieval
+  pipeline, channels and fusion, ingestion, generation states, document
+  lifecycle, channel changes, multiple engines, extension points and
+  evidence. Mermaid sources live in `diagrams/`; `scripts/render-diagrams.mjs`
+  renders them and CI checks that the images match their sources.
 
 ### Changed
 

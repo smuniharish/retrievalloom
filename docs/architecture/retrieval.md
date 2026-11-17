@@ -22,18 +22,11 @@ it or debug it. This page maps the
 
 ## Flow of one request
 
-```text
-retrieve()
-  authorise ─ tenant slot ─ plan
-    └─ snapshot (generation per method, readers, leases) ─ cache lookup
-        └─ methods (concurrent, method_timeout each)
-            └─ method fusion (index channel)
-                └─ candidates ─ dedup ─ channel fusion
-                    └─ rerank (rerank_k) ─ NLI (nli_k)
-                        └─ consolidation (top_k + contradictions)
-                            └─ cache store ─ record provenance ─ metrics
-  release snapshot
-```
+![The four phases of one retrieve call: prepare (authorize, plan, snapshot, cache lookup), search (all methods concurrently), rank (method fusion, candidates, deduplication, channel fusion) and refine (rerank, NLI, consolidation, recording)](../assets/diagrams/retrieval-pipeline.png){ .diagram }
+
+After authorization the request also takes a slot from its tenant's
+concurrency limit. The snapshot is released when the request ends, whether it
+succeeded, failed or was cancelled.
 
 The whole request runs under one deadline (`request_timeout`, or `timeout` in
 `RetrievalExecutionConfig`). With `allow_partial_on_deadline=True`, a deadline

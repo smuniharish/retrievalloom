@@ -5,6 +5,8 @@ Cite every answer and show users where it came from. `retrieve` returns a
 `Evidence` item carries its text, its score, the exact document version and
 location it came from, and a record of how it was found.
 
+![What a result carries: each evidence item has segments that cite their source document version, span, pages and section; provenance with one hit per method and the stage trail; and relations to other evidence, including contradictions](../../assets/diagrams/evidence-provenance.png){ .diagram }
+
 ## Evidence
 
 An evidence item groups matching passages that belong together, so you get

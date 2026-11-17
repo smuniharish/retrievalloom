@@ -1,0 +1,35 @@
+flowchart TB
+    classDef app fill:#ecf8f1,stroke:#2f8f5b,color:#0f2547
+    classDef core fill:#eef4ff,stroke:#3567c7,color:#0f2547
+    classDef provider fill:#fff7e8,stroke:#c98a12,color:#0f2547
+
+    documents["Documents<br/>text · chunks · outline · graph"]:::app
+    query["Query<br/>text · filters · claims"]:::app
+
+    subgraph Engine["RetrievalEngine · async API · worker-thread offloader"]
+        direction LR
+        ingestion["Ingestion<br/>versions · objects · events"]:::core
+        lifecycle["Lifecycle coordinator<br/>coverage · generations<br/>retention · erasure"]:::core
+        pipeline["Retrieval pipeline<br/>snapshot · fusion · rerank<br/>NLI · consolidation"]:::core
+    end
+
+    store[("Metadata store<br/>SQLite · PostgreSQL<br/>source of truth")]:::provider
+
+    subgraph Channels["Channels"]
+        direction LR
+        index["Index<br/>keyword · fuzzy<br/>BM25 · dense"]:::provider
+        graphch["Graph<br/>entities · relations"]:::provider
+        structure["Structure<br/>section tree"]:::provider
+    end
+
+    models["Optional models<br/>embedding · reranker · NLI"]:::provider
+    evidence["Ranked evidence<br/>document · version · span<br/>methods · stage trail"]:::app
+
+    documents -- "ingest" --> ingestion
+    query -- "retrieve" --> pipeline
+    ingestion -- "one transaction<br/>per batch" --> store
+    store -- "pending changes" --> lifecycle
+    lifecycle -- "build · update · publish" --> Channels
+    pipeline -- "search one snapshot" --> Channels
+    pipeline -. "embed · rescore · judge" .-> models
+    pipeline -- "fuse · rank · cite" --> evidence
