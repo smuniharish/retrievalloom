@@ -131,6 +131,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Mark the package as Production/Stable in its PyPI metadata.
 - The fuzzy match cache and the snapshot read memo use `cachetools.LRUCache`.
 - `BM25sIndex` restates bm25s's scoring formulas instead of importing private
   bm25s functions; a test pins them to bm25s's results.
