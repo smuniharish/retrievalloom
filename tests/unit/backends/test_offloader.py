@@ -458,3 +458,41 @@ def test_workload_limits_must_be_positive() -> None:
         OffloaderConfig(workload_limits={WorkloadKind.RERANK: 0})
     with pytest.raises(ValueError, match="greater than or equal to 1"):
         OffloaderConfig.model_validate({"max_cpu_jobs": 0})
+
+
+class BrokenSizing(FakeManager):
+    async def recommend_concurrency(self, *_: Any, **__: Any) -> Any:
+        raise RuntimeError("sizing failed")
+
+
+async def test_limiter_registry_and_failed_start() -> None:
+    offloader = Offloader(resource_manager=fake(FakeManager()))
+    sizing = {"floor": 1, "ceiling": 4, "requirements": None}
+    with pytest.raises(LifecycleError, match="not running"):
+        await offloader.limiter("work", 2, **sizing)  # type: ignore[arg-type]
+    await offloader.start()
+    try:
+        assert set(offloader.concurrency()) == {"offloader.cpu", "offloader.io"}
+        await offloader.limiter("work", 2, **sizing)  # type: ignore[arg-type]
+        with pytest.raises(LifecycleError, match="duplicate"):
+            await offloader.limiter("work", 2, **sizing)  # type: ignore[arg-type]
+    finally:
+        await offloader.close()
+
+    broken = Offloader(resource_manager=fake(BrokenSizing()))
+    with pytest.raises(RuntimeError, match="sizing failed"):
+        await broken.start()
+    with pytest.raises(LifecycleError):  # a failed start leaves the offloader closed
+        await broken.run(WorkloadKind.HASHING, int)
+
+
+async def test_fixed_workers_time_out_without_adaptive_limiters() -> None:
+    gate = threading.Event()
+    offloader = await started(max_workers=2)
+    try:
+        assert offloader.concurrency() == {}
+        with pytest.raises(OperationTimeoutError):
+            await offloader.run(WorkloadKind.RERANK, gate.wait, 5, timeout=0.05)
+    finally:
+        gate.set()
+        await offloader.close()

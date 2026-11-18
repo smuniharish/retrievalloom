@@ -427,3 +427,17 @@ async def test_failures_stay_failed_until_a_backfill(
         await h.coordinator.maintain(housekeeping=False)
     assert (await coverage(h, "a")).state == CoverageState.FAILED
     assert requeued(h) == []
+
+
+async def test_unit_timeout_signals_overload(store: SQLiteMetadataStore) -> None:
+    backend = DictIndex()
+    h = harness(store, backend, unit_timeout=0.05)
+    await h.ingestion.ingest([text_doc("a", "x")], SCOPE)
+
+    async def stall() -> None:
+        await asyncio.sleep(5)
+
+    backend.hooks["create_generation"] = stall
+    result = await h.coordinator.run_once()
+    assert h.coordinator._limiter.state()["reason"].startswith("overload")
+    assert {issue.exception_type for issue in result.errors} <= {"OperationTimeoutError"}

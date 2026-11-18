@@ -84,6 +84,8 @@ def test_ingestion_config_rejects_unknown_hash_profile() -> None:
     [
         (IngestionConfig, {"concurrency": 0}),
         (EngineConfig, {"ingestion": {"concurrency": 257}}),
+        (EngineConfig, {"ingestion": {"concurrency": {"mode": "auto", "maximum": 257}}}),
+        (EngineConfig, {"lifecycle": {"max_concurrency": {"mode": "auto", "minimum": 65}}}),
         (IngestionConfig, {"index_wait_timeout": 0}),
         (IngestionConfig, {"index_wait": "some"}),
         (MethodConfig, {"weight": float("inf")}),
@@ -113,6 +115,12 @@ def test_tenant_policy_lookup_falls_back_to_default() -> None:
     config = RetrievalConfig(tenant_policies={"vip": special})
     assert config.tenant_policy("vip") is special
     assert config.tenant_policy("other") is config.default_tenant_policy
+
+
+def test_tenant_policy_accepts_the_deprecated_job_limit_name() -> None:
+    with pytest.warns(DeprecationWarning, match="max_concurrent_offloaded_jobs"):
+        policy = TenantPolicy.model_validate({"max_concurrent_cpu_jobs": 2})
+    assert policy.max_concurrent_offloaded_jobs == 2
 
 
 def test_engine_config_is_frozen_and_roundtrips() -> None:

@@ -145,11 +145,6 @@ class IngestionService:
             requirements=INGESTION_REQUIREMENTS,
         )
 
-    @property
-    def limiter(self) -> AdaptiveLimiter:
-        """Limiter bounding graph extraction across ``ingest`` calls."""
-        return self._limiter
-
     @contextlib.asynccontextmanager
     async def _extraction_slot(self) -> AsyncIterator[None]:
         """Hold an extraction permit; dependency overload halves an automatic limit."""

@@ -157,11 +157,6 @@ class RapidFuzzIndex(FuzzyIndexABC, InMemoryGenerationalIndex):
         """Component identity."""
         return self._info
 
-    @property
-    def max_ngram(self) -> int:
-        """Longest query n-gram."""
-        return self._max_ngram
-
     def _empty(self, spec: GenerationSpec) -> _FuzzyStructure:
         phrases = {
             surface: fold(surface)

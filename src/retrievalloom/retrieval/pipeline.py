@@ -627,9 +627,7 @@ class RetrievalPipeline:
         short: list[str] = []
         for ready in snapshot.methods:
             name = ready.planned.name
-            unit_hits = hits.get(name)
-            if unit_hits is None:
-                continue
+            unit_hits = hits.get(name, ())
             kept = [
                 hit.object_ref.object_id
                 for hit in unit_hits

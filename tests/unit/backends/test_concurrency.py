@@ -158,3 +158,28 @@ def test_auto_bounds_and_validation() -> None:
         AutoConcurrency(minimum=5, maximum=4)
     with pytest.raises(ValueError, match="1 <= minimum <= maximum"):
         AdaptiveLimiter("x", minimum=0, maximum=4)
+
+
+async def test_lifecycle_edges_and_failed_adjustments_keep_running() -> None:
+    fixed = AdaptiveLimiter.from_setting("x", 3, floor=1, ceiling=8, requirements=_NEEDS)
+    await fixed.start(_Manager(spare=8))  # type: ignore[arg-type]
+    await fixed.close()  # never started a task
+    unstarted = AdaptiveLimiter.from_setting(
+        "y", AutoConcurrency(), floor=2, ceiling=8, requirements=_NEEDS
+    )
+    await unstarted.adjust()  # no manager yet: nothing to do
+    assert unstarted.limit == 2
+
+    setting = AutoConcurrency(minimum=2, maximum=8, interval=0.01)
+    limiter = AdaptiveLimiter.from_setting("z", setting, floor=2, ceiling=8, requirements=_NEEDS)
+    manager = _Manager(spare=8)
+    await limiter.start(manager)  # type: ignore[arg-type]
+    task = limiter._task
+    await limiter.start(manager)  # type: ignore[arg-type]  # idempotent
+    assert limiter._task is task
+    manager.spare = RuntimeError("manager broke")
+    await asyncio.sleep(0.05)  # several failing rounds
+    assert task is not None
+    assert not task.done()
+    assert limiter.limit == 2
+    await limiter.close()

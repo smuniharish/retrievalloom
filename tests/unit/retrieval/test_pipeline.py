@@ -840,3 +840,7 @@ async def test_claims_and_fuzzy_matches_follow_configured_limits() -> None:
             found[kept] = len(result.evidence)
     assert found[1] == 1
     assert found[10] == len(docs)
+
+
+def test_graph_depth_check_skips_without_a_store_or_depth() -> None:
+    engine_module._check_graph_depth(None, None)
