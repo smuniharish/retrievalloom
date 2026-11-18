@@ -35,8 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The package is classified as Production/Stable.
-- The lockfile uses current compatible stable releases for the direct
-  dependencies. The optional examples group bounds Transformers below 6,
+- Minimum direct dependency versions have been raised to the currently
+  resolved releases. The optional examples group bounds Transformers below 6,
   matching FlagEmbedding's declared compatibility, and FastAPI below 1.
 - Ingestion, indexing, retrieval and document lifecycle operations use
   batched store operations where supported, reducing corpus-wide work during
@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Migration from 0.1
 
+- Upgrade existing installations to meet the new minimum dependency versions;
+  applications with tighter dependency constraints may need to update them.
 - Settings that previously exceeded fixed limits are accepted after raising
   the corresponding field in `EngineLimits`.
 - To retain fixed concurrency, set integer values for

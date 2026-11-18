@@ -42,31 +42,31 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 type Range = tuple[tuple[int, ...], tuple[int, ...] | None]
 
 REQUIRED: dict[str, Range] = {
-    "agxai": ((1, 0, 2), (2,)),
+    "agxai": ((1, 0, 3), (2,)),
     "ahocorasick-rs": ((1, 0, 3), (2,)),
     "aiosqlite": ((0, 22, 1), (1,)),
     "alembic": ((1, 20, 1), (2,)),
     "bm25s": ((0, 3, 16), (0, 4)),
-    "cachetools": ((6,), (9,)),
+    "cachetools": ((8, 0, 1), (9,)),
     "flashrank": ((0, 2, 10), (0, 3)),
-    "numpy": ((2, 2), None),
+    "numpy": ((2, 5, 5), None),
     "pydantic": ((2, 14, 3), (3,)),
     "qdrant-client": ((1, 20, 0), (2,)),
     "ranknexus": ((0, 1, 0), (0, 2)),
     "rapidfuzz": ((3, 14, 6), (4,)),
-    "refresh-engine": ((1, 0, 0), (2,)),
-    "resourcera": ((0, 2, 0), (0, 3)),
-    "sqlalchemy": ((2, 1, 8), (2, 2)),
-    "structlog": ((25, 5, 0), None),
+    "refresh-engine": ((1, 0, 1), (2,)),
+    "resourcera": ((0, 2, 1), (0, 3)),
+    "sqlalchemy": ((2, 1, 9), (2, 2)),
+    "structlog": ((26, 1, 0), None),
 }
 # extra -> (distribution, range, module to import or None)
 EXTRAS: dict[str, list[tuple[str, Range, str | None]]] = {
     "graph": [("ladybug", ((0, 22, 3), (0, 23)), "ladybug")],
     "structure": [("pytreesearch", ((1, 1, 1), (2,)), "treesearch")],
-    "postgres": [("asyncpg", ((0, 30), None), "asyncpg")],
+    "postgres": [("asyncpg", ((0, 32, 0), None), "asyncpg")],
     "testing": [
         ("pytest", ((9, 2, 0), None), None),
-        ("pytest-asyncio", ((1, 4, 1), None), None),
+        ("pytest-asyncio", ((1, 5, 0), None), None),
     ],
 }
 

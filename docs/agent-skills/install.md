@@ -102,7 +102,7 @@ test the skills, so you can leave them out.
     PASS  retrievalloom 0.2.0 (0.2.x expected)
     PASS  pydantic 2.14.3 (>=2.14.3,<3 required)
     ...
-    PASS  extra 'postgres': asyncpg 0.32.0 (>=0.30 required)
+    PASS  extra 'postgres': asyncpg 0.32.0 (>=0.32.0 required)
     INFO  PostgreSQL probe skipped (set RETRIEVALLOOM_DSN to run it)
     INFO  Qdrant probe skipped (set RETRIEVALLOOM_QDRANT_URL to run it)
     PASS  ingest: [('created', 3)]
