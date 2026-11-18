@@ -66,12 +66,16 @@ class IndexCapabilities(FrozenModel):
         durable: Data survives process restarts and may be shared between engines.
         filter_pushdown: The backend evaluates ``FilterExpression`` itself.
         max_batch: Largest write batch.
+        max_depth: Deepest graph traversal a graph store supports (``None``: no limit,
+            or not a graph store). The engine checks the configured depth against it
+            at ``initialize``.
     """
 
     mutable_in_place: bool
     durable: bool
     filter_pushdown: bool = True
-    max_batch: int = 256
+    max_batch: int = Field(default=256, ge=1)
+    max_depth: int | None = Field(default=None, ge=1)
 
 
 class GenerationalIndexABC(ComponentABC):

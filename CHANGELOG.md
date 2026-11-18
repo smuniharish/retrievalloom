@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0]
+
+### Added
+
+- `EngineLimits` (`EngineConfig.limits`, `create_retrieval_engine(limits=...)`):
+  every upper bound on a setting is now a default that applications can raise.
+  This covers `candidate_k`, `rerank_k`, `nli_k`, fuzzy n-gram length and
+  matches, graph depth, ingestion, lifecycle and offloader concurrency,
+  lifecycle batch size and attempts, claims per request and the consolidation
+  window. A setting above its bound fails with an error that names the limit
+  to raise.
+- `AutoConcurrency`, the new default for `IngestionConfig.concurrency`,
+  `LifecycleConfig.max_concurrency` and `OffloaderConfig.max_workers`. Limits
+  are sized from the host capacity resourcera measures, grow while work
+  waits, shrink when capacity drops, and halve on timeouts or unavailable
+  backends. An integer still fixes the limit.
+- `health().details["concurrency"]` reports the state of every limiter.
+- `FuzzyConfig.matches_per_ngram` (default 5, previously fixed).
+- `RetrievalConfig.filter_overfetch` (default 4): methods without filter
+  pushdown fetch `candidate_k` times this factor before post-filtering.
+- `LifecycleConfig.housekeeping_interval` (default 300 s) and
+  `EngineConfig.health_timeout` (default 5 s), both previously fixed.
+- `IndexCapabilities.max_depth` lets a graph store declare its deepest
+  supported traversal; `initialize` rejects a deeper configured depth.
+- Warning codes `limit_clamped` (a tenant policy reduced a configured value)
+  and `filter_underfetch` (post-filtering left fewer than `candidate_k` hits).
+
+### Changed
+
+- `TenantPolicy.max_concurrent_cpu_jobs` is renamed
+  `max_concurrent_offloaded_jobs` and defaults to `None`, which falls back to
+  `OffloaderConfig.max_concurrent_jobs_per_tenant`. Previously the tenant
+  policy default (4) always overrode the offloader setting.
+- `IngestionConfig.concurrency` is now shared by all `ingest` calls of an
+  engine instead of applying per call.
+- `LifecycleConfig.unit_timeout` now starts when a unit begins running, not
+  when it is queued.
+- Incremental index writes and every index removal are split to the
+  backend's `IndexCapabilities.max_batch`.
+
+### Deprecated
+
+- `TenantPolicy.max_concurrent_cpu_jobs`. The old name is still accepted and
+  emits a `DeprecationWarning`.
+
+### Migration from 0.1
+
+- Settings that 0.1 rejected above a fixed maximum are accepted after raising
+  the matching `EngineLimits` field.
+- To keep 0.1's fixed concurrency, set `IngestionConfig(concurrency=8)`,
+  `LifecycleConfig(max_concurrency=4)` and `OffloaderConfig(max_workers=8)`.
+- Rename `max_concurrent_cpu_jobs` to `max_concurrent_offloaded_jobs`.
+
+## [0.1.1]
+
 ### Added
 
 - First release of RetrievalLoom: an async-first, provider-agnostic,

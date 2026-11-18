@@ -36,7 +36,6 @@ if TYPE_CHECKING:
 
 _METHOD = MethodRef(channel=Channel.INDEX, method="fuzzy")
 _SEMANTICS = ScoreSemantics(higher_is_better=True, range=ScoreRange.UNBOUNDED)
-_MATCHES_PER_NGRAM = 5
 # Query n-grams whose matches each generation memoises.
 _MATCH_CACHE_SIZE = 4096
 # rapidfuzz's overloaded scorer stubs do not satisfy its own extract() overloads.
@@ -104,15 +103,17 @@ class RapidFuzzIndex(FuzzyIndexABC, InMemoryGenerationalIndex):
     tokens of at least ``min_token_length`` characters. Writes and removals update the
     postings in place; the sorted vocabulary is refreshed on the next search. Query
     n-grams (1..``max_ngram`` tokens) are scored with ``rapidfuzz.process.cdist``
-    (``WRatio``, GIL released) and the best five vocabulary terms per n-gram are kept;
-    an object's score is the sum over matched vocabulary terms of the best
-    similarity / 100.
+    (``WRatio``, GIL released) and the best ``matches_per_ngram`` vocabulary terms per
+    n-gram are kept; an object's score is the sum over matched vocabulary terms of the
+    best similarity / 100.
 
     Args:
         score_cutoff: Minimum similarity (0-100).
         max_ngram: Longest query n-gram.
         corpus_vocabulary: Add corpus tokens to the vocabulary.
         min_token_length: Shortest token or n-gram considered.
+        matches_per_ngram: Vocabulary terms kept per query n-gram. Raise it for large
+            vocabularies with many near-duplicate terms; it costs query time only.
     """
 
     workload = WorkloadKind.KEYWORD_BUILD
@@ -124,16 +125,20 @@ class RapidFuzzIndex(FuzzyIndexABC, InMemoryGenerationalIndex):
         max_ngram: int = 3,
         corpus_vocabulary: bool = True,
         min_token_length: int = 3,
+        matches_per_ngram: int = 5,
     ) -> None:
         super().__init__()
         if not 0.0 <= score_cutoff <= 100.0:
             raise ConfigurationError("score_cutoff must be within [0, 100]")
-        if max_ngram < 1 or min_token_length < 1:
-            raise ConfigurationError("max_ngram and min_token_length must be positive")
+        if max_ngram < 1 or min_token_length < 1 or matches_per_ngram < 1:
+            raise ConfigurationError(
+                "max_ngram, min_token_length and matches_per_ngram must be positive"
+            )
         self._cutoff = score_cutoff
         self._max_ngram = max_ngram
         self._corpus = corpus_vocabulary
         self._min_length = min_token_length
+        self._matches_per_ngram = matches_per_ngram
         self._info = make_info(
             component="fuzzy_index",
             implementation="rapidfuzz",
@@ -151,6 +156,11 @@ class RapidFuzzIndex(FuzzyIndexABC, InMemoryGenerationalIndex):
     def info(self) -> ComponentInfo:
         """Component identity."""
         return self._info
+
+    @property
+    def max_ngram(self) -> int:
+        """Longest query n-gram."""
+        return self._max_ngram
 
     def _empty(self, spec: GenerationSpec) -> _FuzzyStructure:
         phrases = {
@@ -218,7 +228,7 @@ class RapidFuzzIndex(FuzzyIndexABC, InMemoryGenerationalIndex):
             matches.append(
                 tuple(
                     (vocabulary[index], float(row[index]))
-                    for index in candidates[:_MATCHES_PER_NGRAM]
+                    for index in candidates[: self._matches_per_ngram]
                 )
             )
         return matches

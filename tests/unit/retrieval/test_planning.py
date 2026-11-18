@@ -92,15 +92,17 @@ def test_validate_request_bounds(
     config: RetrievalConfig, request_kwargs: dict[str, Any], limit: int
 ) -> None:
     with pytest.raises(ValidationError) as caught:
-        validate_request(_request(**request_kwargs), config)
+        validate_request(_request(**request_kwargs), config, max_claims=32)
     assert caught.value.details["limit"] == limit
 
 
 def test_validate_request_claim_limit_and_valid_request() -> None:
     config = RetrievalConfig()
-    validate_request(_request(claims=("c",) * 32), config)
-    with pytest.raises(ValidationError):
-        validate_request(_request(claims=("c",) * 33), config)
+    validate_request(_request(claims=("c",) * 32), config, max_claims=32)
+    with pytest.raises(ValidationError) as caught:
+        validate_request(_request(claims=("c",) * 33), config, max_claims=32)
+    assert caught.value.details["limit"] == 32
+    validate_request(_request(claims=("c",) * 33), config, max_claims=64)
 
 
 def test_tenant_policy_limits_candidate_k_and_defaults() -> None:
@@ -114,6 +116,9 @@ def test_tenant_policy_limits_candidate_k_and_defaults() -> None:
     keyword = plan.method("index.keyword")
     assert keyword is not None
     assert keyword.candidate_k == 7
+    clamped = next(w for w in plan.warnings if w.code == WarningCode.LIMIT_CLAMPED)
+    assert clamped.severity == Severity.INFO
+    assert clamped.details == {"setting": "candidate_k", "requested": 900, "applied": 7}
     assert keyword.weight == 2.0
     assert not keyword.fail
     assert plan.method("index.dense") is None

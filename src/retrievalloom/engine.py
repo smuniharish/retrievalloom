@@ -15,6 +15,7 @@ from retrievalloom._logging import get_logger
 from retrievalloom.config import (
     Components,
     EngineConfig,
+    EngineLimits,
     EngineResources,
     IndexWait,
     IngestionConfig,
@@ -62,9 +63,18 @@ from retrievalloom.infra.access import AllowAllAccessPolicy
 from retrievalloom.infra.cache import InMemoryLRUCache, NoCache
 from retrievalloom.infra.metrics import NullMetrics
 from retrievalloom.infra.recorders import NoOpProvenanceRecorder
-from retrievalloom.lifecycle.coordinator import LifecycleCoordinator
+from retrievalloom.lifecycle.coordinator import (
+    LIFECYCLE_FLOOR,
+    LIFECYCLE_REQUIREMENTS,
+    LifecycleCoordinator,
+)
 from retrievalloom.lifecycle.indexer import ReaderTracker, UnitIndexer, task_units
-from retrievalloom.lifecycle.ingestion import GraphDerivation, IngestionService
+from retrievalloom.lifecycle.ingestion import (
+    INGESTION_FLOOR,
+    INGESTION_REQUIREMENTS,
+    GraphDerivation,
+    IngestionService,
+)
 from retrievalloom.lifecycle.purge import DocumentEraser
 from retrievalloom.lifecycle.units import ItemPreparer, make_unit
 from retrievalloom.retrieval.pipeline import PipelineComponents, RetrievalPipeline
@@ -96,7 +106,6 @@ if TYPE_CHECKING:
     from retrievalloom.lifecycle.units import IndexUnit
     from retrievalloom.storage.base import DocumentMetadataStoreABC
 
-_HEALTH_TIMEOUT = 5.0
 _ACTIVE_TASKS = (TaskState.QUEUED, TaskState.RUNNING)
 
 
@@ -146,6 +155,19 @@ class _Wiring:
 
 def _first(*values: int | None, default: int) -> int:
     return next((value for value in values if value is not None), default)
+
+
+def _check_graph_depth(store: GraphStoreABC | None, retriever: GraphRetrieverABC | None) -> None:
+    """Reject a traversal depth the graph store cannot execute, before anything starts."""
+    depth = getattr(retriever, "depth", None)
+    if store is None or not isinstance(depth, int):
+        return
+    maximum = store.capabilities.max_depth
+    if maximum is not None and depth > maximum:
+        raise ConfigurationError(
+            "graph traversal depth exceeds what the graph store supports",
+            details={"depth": depth, "max_depth": maximum, "store": store.info.name},
+        )
 
 
 def _error_locations(exc: pydantic.ValidationError) -> list[dict[str, Any]]:
@@ -514,7 +536,11 @@ class RetrievalEngine:
             )
 
     async def health(self) -> HealthReport:
-        """Aggregate health of the engine and its components (never raises when open)."""
+        """Aggregate health of the engine and its components (never raises when open).
+
+        ``details["concurrency"]`` reports every concurrency limiter: its mode, current
+        limit, bounds, active and waiting work, and the resource limiting it.
+        """
         async with self._operation() as runtime:
             reports = [await self._component_health(item) for item in runtime.initialized]
             order = [HealthStatus.HEALTHY, HealthStatus.DEGRADED, HealthStatus.UNHEALTHY]
@@ -522,7 +548,11 @@ class RetrievalEngine:
             return HealthReport(
                 component="retrieval_engine",
                 status=worst,
-                details={"engine_id": self._engine_id, "units": sorted(runtime.units)},
+                details={
+                    "engine_id": self._engine_id,
+                    "units": sorted(runtime.units),
+                    "concurrency": runtime.offloader.concurrency(),
+                },
                 components=tuple(reports),
             )
 
@@ -543,14 +573,15 @@ class RetrievalEngine:
     def _make_offloader(self) -> Offloader:
         policy = self._config.retrieval
 
-        def tenant_limit(tenant: str) -> int:
-            return policy.tenant_policy(tenant).max_concurrent_cpu_jobs
+        def tenant_limit(tenant: str) -> int | None:
+            return policy.tenant_policy(tenant).max_concurrent_offloaded_jobs
 
         return Offloader(
             self._config.offloader,
             executor=self._resources.executor,
             resource_manager=self._resources.resource_manager,
             tenant_limit=tenant_limit,
+            max_workers_ceiling=self._config.limits.max_offloader_workers,
         )
 
     async def _build(self, offloader: Offloader, wiring: _Wiring) -> _Runtime:
@@ -596,6 +627,7 @@ class RetrievalEngine:
                 lambda: RapidFuzzIndex(
                     score_cutoff=fuzzy.score_cutoff,
                     max_ngram=fuzzy.max_ngram,
+                    matches_per_ngram=fuzzy.matches_per_ngram,
                     corpus_vocabulary=fuzzy.corpus_vocabulary,
                     min_token_length=fuzzy.min_token_length,
                 )
@@ -623,6 +655,7 @@ class RetrievalEngine:
             )
             normalizer = wiring.use(supplied.graph_normalizer, _default_normalizer)
             extractor = wiring.use(supplied.graph_extractor, None)
+            _check_graph_depth(graph_store, graph_retriever)
         structure_engine = None
         if channels.structure.enabled:
             structure_engine = wiring.use(
@@ -676,12 +709,20 @@ class RetrievalEngine:
             )
         readers = ReaderTracker(lease_ttl=config.lifecycle.lease_ttl)
         lifecycle = config.lifecycle
+        limits = config.limits
         ingestion = IngestionService(
             store,
             config.ingestion,
             clock=utc_now,
             logger=self._logger,
             graph=None if normalizer is None else GraphDerivation(normalizer, extractor),
+            limiter=await offloader.limiter(
+                "ingestion",
+                config.ingestion.concurrency,
+                floor=INGESTION_FLOOR,
+                ceiling=limits.max_ingestion_concurrency,
+                requirements=INGESTION_REQUIREMENTS,
+            ),
         )
         indexer = UnitIndexer(
             store,
@@ -706,6 +747,13 @@ class RetrievalEngine:
             clock=utc_now,
             logger=self._logger,
             eraser=eraser,
+            limiter=await offloader.limiter(
+                "lifecycle",
+                lifecycle.max_concurrency,
+                floor=LIFECYCLE_FLOOR,
+                ceiling=limits.max_lifecycle_concurrency,
+                requirements=LIFECYCLE_REQUIREMENTS,
+            ),
         )
         pipeline = RetrievalPipeline(
             PipelineComponents(
@@ -730,6 +778,7 @@ class RetrievalEngine:
                 embedding_cache=embedding_cache,
                 schedule_backfill=self._schedule_backfill,
                 log_content=config.log_content,
+                max_claims=limits.max_claims,
             )
         )
         runtime = _Runtime(
@@ -943,7 +992,7 @@ class RetrievalEngine:
     async def _component_health(self, component: ComponentABC) -> HealthReport:
         name = component.info.name
         try:
-            async with asyncio.timeout(_HEALTH_TIMEOUT):
+            async with asyncio.timeout(self._config.health_timeout):
                 return await component.health()
         except Exception as exc:
             return HealthReport(
@@ -1007,12 +1056,16 @@ def create_retrieval_engine(
     retrieval: RetrievalConfig | None = None,
     lifecycle: LifecycleConfig | None = None,
     offloader: OffloaderConfig | None = None,
+    limits: EngineLimits | None = None,
+    health_timeout: float = 5.0,
     components: Components | None = None,
     resources: EngineResources | None = None,
     log_content: bool = False,
     engine_id: str | None = None,
 ) -> RetrievalEngine:
     """Create an engine (not yet initialised) from configuration layers.
+
+    ``limits`` raises the upper bounds the other settings are validated against.
 
     Example:
         ```python
@@ -1027,6 +1080,8 @@ def create_retrieval_engine(
         retrieval=retrieval or RetrievalConfig(),
         lifecycle=lifecycle or LifecycleConfig(),
         offloader=offloader or OffloaderConfig(),
+        limits=limits or EngineLimits(),
+        health_timeout=health_timeout,
         log_content=log_content,
     )
     return RetrievalEngine(config, components, resources, engine_id=engine_id)

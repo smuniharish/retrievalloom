@@ -119,12 +119,14 @@ weighted methods.
 
 ## Limit each tenant
 
-`TenantPolicy` sets `max_concurrent_requests` (16), `max_concurrent_cpu_jobs`
-(4), `max_top_k` (100), `max_candidate_k` (500), `max_ingest_batch` (1000),
+`TenantPolicy` sets `max_concurrent_requests` (16),
+`max_concurrent_offloaded_jobs` (`None`, falling back to
+`OffloaderConfig.max_concurrent_jobs_per_tenant`, 4; the old name
+`max_concurrent_cpu_jobs` still works with a `DeprecationWarning`), `max_top_k` (100), `max_candidate_k` (500), `max_ingest_batch` (1000),
 and `allowed_channels`. Set `RetrievalConfig.default_tenant_policy` and
 per-tenant `tenant_policies={"tenant-id": TenantPolicy(...)}`. A `top_k` or an
 ingest batch above its limit raises `ValidationError`, and `candidate_k` is
-capped at `max_candidate_k`. Requests beyond `max_concurrent_requests` wait
+capped at `max_candidate_k` with an `info` `limit_clamped` warning. Requests beyond `max_concurrent_requests` wait
 for a slot within their deadline. Forcing a disallowed channel raises
 `ConfigurationError`.
 
@@ -135,10 +137,34 @@ for a slot within their deadline. Forcing a disallowed channel raises
 | `index_wait` | `all` | `ingest` and `delete` wait for one indexing round; `none` returns at once |
 | `index_wait_timeout` | 120 s | Then return with `index_wait_timeout`; indexing continues |
 | `failure_policy` | `per_document` | Store valid documents and report invalid ones; `fail_batch` rejects the call |
-| `concurrency` | 8 | Documents prepared concurrently |
+| `concurrency` | `auto` | Graph extractions at once across the engine |
 | `transient_metadata_keys` | `()` | Metadata keys whose change creates no new version |
 | `redelivery_window_seconds` | 300 | Window for `possible_redelivery` |
 | `limits` | `IngestionLimits()` | Per-call caps on documents, representations, chunks, and text |
+
+## Concurrency and limits
+
+`IngestionConfig.concurrency`, `LifecycleConfig.max_concurrency` and
+`OffloaderConfig.max_workers` default to `AutoConcurrency`: resourcera sizes
+them from measured host capacity. Pass an integer to fix one, or
+`AutoConcurrency(minimum=..., maximum=...)` to bound it. `health().details["concurrency"]`
+shows each limiter.
+
+Every upper bound is a field of `EngineLimits`, passed as
+`EngineConfig(limits=...)`. Raise a field when a setting is rejected with
+`exceeds limits.<field>`:
+
+```python
+from retrievalloom import EngineConfig, EngineLimits
+
+config = EngineConfig(limits=EngineLimits(max_candidate_k=50_000, max_claims=128))
+```
+
+Fields and defaults: `max_candidate_k` 10000, `max_rerank_k` 1000,
+`max_nli_k` 200, `max_fuzzy_ngram` 6, `max_fuzzy_matches_per_ngram` 100,
+`max_graph_depth` 4, `max_ingestion_concurrency` 256, `max_lifecycle_batch`
+10000, `max_lifecycle_concurrency` 64, `max_lifecycle_attempts` 20,
+`max_offloader_workers` 512, `max_claims` 32, `max_window_multiplier` 20.
 
 ## Override one request
 

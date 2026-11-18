@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import os
 from concurrent.futures import Executor, ThreadPoolExecutor
 from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated, Any
@@ -22,6 +23,12 @@ from resourcera import (
 from retrievalloom._logging import get_logger
 from retrievalloom.domain.base import FrozenModel
 from retrievalloom.errors import LifecycleError, OperationTimeoutError, ResourceAdmissionError
+from retrievalloom.runtime.concurrency import (
+    AdaptiveLimiter,
+    AutoConcurrency,
+    Concurrency,
+    concurrency_maximum,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -52,14 +59,28 @@ class WorkloadKind(StrEnum):
 _IO_KINDS = frozenset(
     {WorkloadKind.IO_RETRIEVAL, WorkloadKind.GRAPH_QUERY, WorkloadKind.STRUCTURE_QUERY}
 )
+DEFAULT_MAX_WORKERS = 512
+"""Default ``EngineLimits.max_offloader_workers``."""
+_IO_FLOOR = 8
+
+
+def _cpu_floor() -> int:
+    return min(8, max(2, os.cpu_count() or 2))
 
 
 class OffloaderConfig(FrozenModel):
     """Offloader settings.
 
     Attributes:
-        max_workers: Threads of the engine-owned executor.
-        max_concurrent_jobs_per_tenant: Default per-tenant fair-share limit.
+        max_workers: Jobs running at once. ``AutoConcurrency`` (the default, also
+            accepted as ``"auto"``) sizes CPU-bound and I/O-bound jobs separately from
+            measured host capacity: CPU-bound jobs start at ``min(8, cpu_count)``
+            (at least 2), I/O-bound jobs at 8, and both may grow to the maximum
+            (``EngineLimits.max_offloader_workers`` by default, and never above
+            ``resource_config.max_concurrency``). An integer fixes the size of the
+            engine-owned thread pool, as in 0.1.
+        max_concurrent_jobs_per_tenant: Default per-tenant fair-share limit; a tenant's
+            ``TenantPolicy.max_concurrent_offloaded_jobs`` overrides it.
         admission_wait_timeout: Seconds to wait for resourcera admission.
         memory_per_job: Memory requirement declared per job.
         cpu_per_job: Optional CPU requirement (needs warm resourcera samples).
@@ -72,10 +93,11 @@ class OffloaderConfig(FrozenModel):
             example ``{WorkloadKind.EMBEDDING: 1}``.
         resource_config: Settings for the engine-owned resourcera manager. The default
             raises resourcera's monitoring CPU budget to 5% so transient sampling
-            spikes on busy hosts do not suspend admission.
+            spikes on busy hosts do not suspend admission, and allows 512 concurrent
+            leases so automatic sizing can reach the default maximum.
     """
 
-    max_workers: int = Field(default=8, ge=1, le=512)
+    max_workers: Concurrency = Field(default_factory=AutoConcurrency)
     max_cpu_jobs: int | None = Field(default=None, ge=1)
     workload_limits: dict[WorkloadKind, Annotated[int, Field(ge=1)]] = Field(default_factory=dict)
     max_concurrent_jobs_per_tenant: int = Field(default=4, ge=1)
@@ -84,11 +106,16 @@ class OffloaderConfig(FrozenModel):
     cpu_per_job: float | None = Field(default=None, gt=0)
     shutdown_timeout: float = Field(default=30.0, gt=0)
     resource_config: ResourceConfig = Field(
-        default_factory=lambda: ResourceConfig(cpu_budget_fraction=0.05)
+        default_factory=lambda: ResourceConfig(
+            cpu_budget_fraction=0.05, max_concurrency=DEFAULT_MAX_WORKERS
+        )
     )
 
 
-def _release_slots(slots: list[asyncio.Semaphore]) -> None:
+type _Permit = asyncio.Semaphore | AdaptiveLimiter
+
+
+def _release_slots(slots: list[_Permit]) -> None:
     for semaphore in reversed(slots):
         semaphore.release()
 
@@ -104,7 +131,9 @@ class Offloader:
         config: Offloader settings.
         executor: Application-owned executor; the engine creates and owns one otherwise.
         resource_manager: Application-owned resourcera manager; engine-owned otherwise.
-        tenant_limit: Optional callable returning the per-tenant job limit.
+        tenant_limit: Optional callable returning the per-tenant job limit (``None``
+            falls back to ``max_concurrent_jobs_per_tenant``).
+        max_workers_ceiling: Maximum of automatic ``max_workers`` when it sets none.
     """
 
     def __init__(
@@ -113,7 +142,8 @@ class Offloader:
         *,
         executor: Executor | None = None,
         resource_manager: ResourceManager | None = None,
-        tenant_limit: Callable[[str], int] | None = None,
+        tenant_limit: Callable[[str], int | None] | None = None,
+        max_workers_ceiling: int = DEFAULT_MAX_WORKERS,
     ) -> None:
         self._config = config or OffloaderConfig()
         self._executor = executor
@@ -121,6 +151,7 @@ class Offloader:
         self._resources = resource_manager
         self._owns_resources = resource_manager is None
         self._tenant_limit = tenant_limit
+        self._ceiling = max_workers_ceiling
         self._semaphores: dict[str, asyncio.Semaphore] = {}
         self._cpu_semaphore = (
             asyncio.Semaphore(self._config.max_cpu_jobs)
@@ -130,6 +161,9 @@ class Offloader:
         self._kind_semaphores = {
             kind: asyncio.Semaphore(limit) for kind, limit in self._config.workload_limits.items()
         }
+        self._limiters: dict[str, AdaptiveLimiter] = {}
+        self._cpu_limiter: AdaptiveLimiter | None = None
+        self._io_limiter: AdaptiveLimiter | None = None
         self._outstanding: set[asyncio.Future[Any]] = set()
         self._releases: set[asyncio.Task[None]] = set()
         self._started = False
@@ -149,25 +183,98 @@ class Offloader:
         """Create engine-owned executor and resource manager (idempotent)."""
         if self._started:
             return
-        if self._executor is None:
-            self._executor = ThreadPoolExecutor(
-                max_workers=self._config.max_workers, thread_name_prefix="retrievalloom"
-            )
         if self._resources is None:
             self._resources = ResourceManager(self._config.resource_config)
         if self._owns_resources:
             await self._resources.start()
+        setting = self._config.max_workers
+        workers = concurrency_maximum(setting, self._ceiling)
+        if isinstance(setting, AutoConcurrency):
+            leases = self._resources.config.max_concurrency
+            setting = setting.model_copy(update={"maximum": min(workers, leases)})
+            self._cpu_limiter = self._register(
+                AdaptiveLimiter.from_setting(
+                    "offloader.cpu",
+                    setting,
+                    floor=_cpu_floor(),
+                    ceiling=workers,
+                    requirements=self._sizing(WorkloadProfile.CPU_BOUND),
+                )
+            )
+            self._io_limiter = self._register(
+                AdaptiveLimiter.from_setting(
+                    "offloader.io",
+                    setting,
+                    floor=_IO_FLOOR,
+                    ceiling=workers,
+                    requirements=self._sizing(WorkloadProfile.IO_BOUND),
+                )
+            )
+        if self._executor is None:
+            # Threads start lazily, so an automatic pool only grows to the peak in use.
+            self._executor = ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="retrievalloom"
+            )
         self._started = True
+        try:
+            for limiter in self._limiters.values():
+                await limiter.start(self._resources)
+        except BaseException:
+            await self.close()
+            raise
+
+    def _sizing(self, profile: WorkloadProfile) -> WorkloadRequirements:
+        cpu = self._config.cpu_per_job or 1.0
+        return WorkloadRequirements(
+            cpu=cpu if profile is WorkloadProfile.CPU_BOUND else None,
+            memory=self._config.memory_per_job,  # type: ignore[arg-type]
+            profile=profile,
+        )
+
+    def _register(self, limiter: AdaptiveLimiter) -> AdaptiveLimiter:
+        if limiter.name in self._limiters:
+            raise LifecycleError("duplicate limiter", details={"limiter": limiter.name})
+        self._limiters[limiter.name] = limiter
+        return limiter
+
+    async def limiter(
+        self,
+        name: str,
+        setting: int | AutoConcurrency,
+        *,
+        floor: int,
+        ceiling: int,
+        requirements: WorkloadRequirements,
+    ) -> AdaptiveLimiter:
+        """Create a limiter adjusted with this offloader's resource manager.
+
+        The limiter stops adjusting when the offloader closes.
+
+        Raises:
+            LifecycleError: Before ``start``, after ``close`` or for a duplicate name.
+        """
+        if not self._started or self._closed:
+            raise LifecycleError("offloader is not running")
+        limiter = self._register(
+            AdaptiveLimiter.from_setting(
+                name, setting, floor=floor, ceiling=ceiling, requirements=requirements
+            )
+        )
+        assert self._resources is not None
+        await limiter.start(self._resources)
+        return limiter
+
+    def concurrency(self) -> dict[str, dict[str, Any]]:
+        """State of every limiter, keyed by name."""
+        return {name: limiter.state() for name, limiter in self._limiters.items()}
 
     def _semaphore(self, tenant: str) -> asyncio.Semaphore:
         semaphore = self._semaphores.get(tenant)
         if semaphore is None:
-            limit = (
-                self._tenant_limit(tenant)
-                if self._tenant_limit is not None
-                else self._config.max_concurrent_jobs_per_tenant
+            limit = self._tenant_limit(tenant) if self._tenant_limit is not None else None
+            semaphore = asyncio.Semaphore(
+                self._config.max_concurrent_jobs_per_tenant if limit is None else limit
             )
-            semaphore = asyncio.Semaphore(limit)
             self._semaphores[tenant] = semaphore
         return semaphore
 
@@ -236,18 +343,27 @@ class Offloader:
             async with asyncio.timeout(timeout):
                 return await asyncio.shield(future)
         except TimeoutError as exc:
+            limiter = self._limiter_for(kind)
+            if limiter is not None:
+                limiter.signal_overload(f"{kind.value} job exceeded its deadline")
             raise OperationTimeoutError(
                 "offloaded job exceeded its deadline", details={"workload": kind.value}
             ) from exc
 
-    async def _acquire_slots(self, kind: WorkloadKind, tenant: str) -> list[asyncio.Semaphore]:
-        """Acquire the tenant, workload and CPU slots, always in that order."""
-        wanted = [self._semaphore(tenant)]
+    def _limiter_for(self, kind: WorkloadKind) -> AdaptiveLimiter | None:
+        return self._io_limiter if kind in _IO_KINDS else self._cpu_limiter
+
+    async def _acquire_slots(self, kind: WorkloadKind, tenant: str) -> list[_Permit]:
+        """Acquire the tenant, workload, CPU and capacity slots, always in that order."""
+        wanted: list[_Permit] = [self._semaphore(tenant)]
         if kind in self._kind_semaphores:
             wanted.append(self._kind_semaphores[kind])
         if self._cpu_semaphore is not None and kind not in _IO_KINDS:
             wanted.append(self._cpu_semaphore)
-        acquired: list[asyncio.Semaphore] = []
+        limiter = self._limiter_for(kind)
+        if limiter is not None:
+            wanted.append(limiter)
+        acquired: list[_Permit] = []
         try:
             for semaphore in wanted:
                 await semaphore.acquire()
@@ -259,7 +375,7 @@ class Offloader:
 
     def _finished(
         self,
-        slots: list[asyncio.Semaphore],
+        slots: list[_Permit],
         manager: ResourceManager,
         lease: ResourceLease,
         future: asyncio.Future[Any],
@@ -287,6 +403,8 @@ class Offloader:
         if self._closed:
             return
         self._closed = True
+        for limiter in self._limiters.values():
+            await limiter.close()
         if self._outstanding:
             _done, pending = await asyncio.wait(
                 set(self._outstanding), timeout=self._config.shutdown_timeout

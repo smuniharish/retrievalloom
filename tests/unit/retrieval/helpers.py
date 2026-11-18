@@ -10,6 +10,7 @@ from retrievalloom import (
     ChunksRepresentation,
     Components,
     DocumentInput,
+    EngineLimits,
     EngineResources,
     LifecycleConfig,
     RetrievalConfig,
@@ -45,6 +46,7 @@ def build_engine(
     components: Components | None = None,
     lifecycle: LifecycleConfig | None = None,
     ingestion: IngestionConfig | None = None,
+    limits: EngineLimits | None = None,
     **resources: Any,
 ) -> RetrievalEngine:
     """Deterministic engine on the shared resource manager."""
@@ -53,6 +55,7 @@ def build_engine(
         components=components,
         lifecycle=lifecycle or LifecycleConfig(background=False),
         ingestion=ingestion,
+        limits=limits,
         resources=EngineResources(resource_manager=shared_manager(), **resources),
     )
 

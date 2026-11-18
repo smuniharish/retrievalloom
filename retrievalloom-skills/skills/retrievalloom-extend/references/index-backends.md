@@ -32,7 +32,8 @@ generation id.
 | `mutable_in_place` | `True` lets the engine write changes into the active generation. With `False`, every change builds a new generation, and `write` after `seal` must raise a `RetrievalLoomError` such as `GenerationError`. |
 | `durable` | `True` declares that data outlives the process and can be shared by several engines. The engine then protects generations with durable reader leases. |
 | `filter_pushdown` | `True` means `search` applies `filters` itself. With `False`, the engine filters afterwards and adds an `info` `filter_post_applied` warning. |
-| `max_batch` | The most items the engine passes to one `write` call. |
+| `max_batch` | The most items the engine passes to one `write` or `remove` call. |
+| `max_depth` | Graph stores only: the deepest traversal supported, or `None` for no limit. `initialize` raises `ConfigurationError` when the configured graph depth exceeds it. |
 
 Keyword and fuzzy indexes get a new generation whenever the keyword
 dictionary changes, because `GenerationSpec.keyword_entries` is fixed per

@@ -122,7 +122,10 @@ Copy this checklist and keep it current:
 - With `filter_pushdown=False`, the engine filters after your search and adds
   an `info` `filter_post_applied` warning. Pushdown is better: return fewer,
   correct hits.
-- `max_batch` caps how many items the engine passes to one `write` call.
+- `max_batch` caps how many items the engine passes to one `write` or
+  `remove` call.
+- A graph store whose traversal has a hard depth limit reports it in
+  `capabilities.max_depth`; `initialize` rejects a deeper configured depth.
 - `EmbeddingModelABC.max_batch_size` defaults to 64. The engine rejects
   vectors with the wrong count or dimensions, non-finite values, or a zero
   norm.

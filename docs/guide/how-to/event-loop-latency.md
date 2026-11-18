@@ -22,8 +22,11 @@ every request on the loop until it returns. See
 - With `allow_partial_on_deadline=True`, a request that reaches its deadline
   while methods run returns what finished, with status `partial` and a
   `timeout_partial` warning. Otherwise it raises `OperationTimeoutError`.
-- `TenantPolicy.max_concurrent_requests` and `max_concurrent_cpu_jobs` keep
-  one tenant from taking every slot.
+- `TenantPolicy.max_concurrent_requests` and `max_concurrent_offloaded_jobs`
+  keep one tenant from taking every slot.
+- Automatic concurrency (the default for ingestion, lifecycle and offloader
+  workers) shrinks its limits when resourcera reports the host is short of
+  capacity. Pass `AutoConcurrency(maximum=...)` to bound how far they grow.
 
 ## Avoid garbage-collector pauses on large heaps
 

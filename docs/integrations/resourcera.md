@@ -33,12 +33,17 @@ config = EngineConfig(
 | `memory_per_job` | `"16MB"` | Memory each job declares. |
 | `cpu_per_job` | `None` | Optional CPU each job declares. Needs warm resourcera samples. |
 | `admission_wait_timeout` | `5.0` | Seconds to wait for admission. |
-| `max_workers` | `8` | Threads of the engine-owned executor. |
+| `max_workers` | `auto` | Jobs running at once. `auto` sizes CPU-bound and I/O-bound jobs separately from the capacity the manager measures, up to `EngineLimits.max_offloader_workers` (512) and `resource_config.max_concurrency`. An integer fixes the pool size. |
 | `max_cpu_jobs` | `None` | Engine-wide cap on CPU-bound jobs running at once. See [Capping CPU-bound jobs](../guide/concepts/offloading.md#capping-cpu-bound-jobs). |
 | `workload_limits` | `{}` | Per-`WorkloadKind` caps on jobs running at once. |
-| `max_concurrent_jobs_per_tenant` | `4` | Default per-tenant fair share. `TenantPolicy.max_concurrent_cpu_jobs` overrides it per tenant. |
+| `max_concurrent_jobs_per_tenant` | `4` | Default per-tenant fair share. `TenantPolicy.max_concurrent_offloaded_jobs` overrides it per tenant. |
 | `shutdown_timeout` | `30.0` | Seconds `close` waits for running threads. |
-| `resource_config` | `ResourceConfig(cpu_budget_fraction=0.05)` | Settings of the engine-owned manager. |
+| `resource_config` | `ResourceConfig(cpu_budget_fraction=0.05, max_concurrency=512)` | Settings of the engine-owned manager. |
+
+The same manager also sizes ingestion (`IngestionConfig.concurrency`) and
+lifecycle (`LifecycleConfig.max_concurrency`) concurrency when they are
+`auto`, through `ResourceManager.recommend_concurrency`. See
+[Automatic concurrency](../getting-started/configuration.md#automatic-concurrency).
 
 ## Share your own manager
 

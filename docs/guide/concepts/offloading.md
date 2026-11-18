@@ -13,13 +13,19 @@ runs the synchronous callable `fn(*args)` in an executor and awaits the result.
 Before the job starts:
 
 1. **Fair share.** The job takes a slot of its tenant's semaphore. The limit is
-   the tenant's `TenantPolicy.max_concurrent_cpu_jobs` (default 4). Jobs
+   the tenant's `TenantPolicy.max_concurrent_offloaded_jobs`, or
+   `OffloaderConfig.max_concurrent_jobs_per_tenant` (default 4). Jobs
    without a tenant share one pool.
 2. **Admission.** The job reserves capacity from the resourcera
    `ResourceManager`: `memory_per_job` (default `16MB`) and, if set,
    `cpu_per_job`, with an I/O-bound or CPU-bound profile chosen from the
    workload kind. If no capacity frees up within `admission_wait_timeout`
    (default 5 s), the call raises `ResourceAdmissionError`.
+
+Next, the job takes a slot of the engine-wide worker limit for its profile.
+With `max_workers="auto"` (the default), CPU-bound and I/O-bound jobs have
+separate adaptive limits sized from the capacity resourcera measures; see
+[Automatic concurrency](../../getting-started/configuration.md#automatic-concurrency).
 
 Between the two, the job also takes a slot of any engine-wide cap that
 applies to it: `OffloaderConfig.workload_limits[kind]` and, for CPU-bound
@@ -92,7 +98,8 @@ complete, runnable adapter.
 ## Sharing an executor or resource manager
 
 By default the engine creates and owns a `ThreadPoolExecutor`
-(`OffloaderConfig.max_workers`, default 8) and a resourcera `ResourceManager`.
+(sized by `OffloaderConfig.max_workers`; threads start only when needed) and
+a resourcera `ResourceManager`.
 To share them with the rest of your application, pass them in
 `EngineResources`:
 

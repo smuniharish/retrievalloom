@@ -62,11 +62,13 @@ class ExecutionPlan:
         return next((method for method in self.methods if method.name == name), None)
 
 
-def validate_request(request: RetrievalRequest, config: RetrievalConfig) -> None:
+def validate_request(
+    request: RetrievalRequest, config: RetrievalConfig, *, max_claims: int
+) -> None:
     """Check request bounds that the model cannot know.
 
     Raises:
-        ValidationError: The query, ``top_k`` or the filter exceeds a configured bound.
+        ValidationError: The query, ``top_k``, the filter or the claims exceed a bound.
     """
     if len(request.query) > config.max_query_chars:
         raise ValidationError(
@@ -82,8 +84,11 @@ def validate_request(request: RetrievalRequest, config: RetrievalConfig) -> None
         raise ValidationError(
             "filter has too many nodes", details={"limit": config.max_filter_nodes}
         )
-    if len(request.claims) > 32:
-        raise ValidationError("at most 32 claims are allowed per request")
+    if len(request.claims) > max_claims:
+        raise ValidationError(
+            f"at most {max_claims} claims are allowed per request",
+            details={"limit": max_claims, "hint": "raise EngineLimits.max_claims"},
+        )
 
 
 def _info(
@@ -144,10 +149,26 @@ class _Planner:
                 else _info(WarningCode.METHOD_UNAVAILABLE, message, channel, method)
             )
             return
+        candidate_k = min(config.candidate_k, self.policy.max_candidate_k)
+        if candidate_k < config.candidate_k:
+            self.warnings.append(
+                RetrievalWarning(
+                    code=WarningCode.LIMIT_CLAMPED,
+                    severity=Severity.INFO,
+                    channel=channel,
+                    method=method,
+                    message="candidate_k reduced to the tenant policy's max_candidate_k",
+                    details={
+                        "setting": "candidate_k",
+                        "requested": config.candidate_k,
+                        "applied": candidate_k,
+                    },
+                )
+            )
         self.methods.append(
             PlannedMethod(
                 unit=unit,
-                candidate_k=min(config.candidate_k, self.policy.max_candidate_k),
+                candidate_k=candidate_k,
                 weight=config.weight,
                 fail=config.on_error == "fail",
             )

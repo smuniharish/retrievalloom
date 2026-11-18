@@ -27,13 +27,35 @@ with `asyncio.run_coroutine_threadsafe`.
 | Limit | Setting | Effect |
 | --- | --- | --- |
 | Requests per tenant | `TenantPolicy.max_concurrent_requests` (16) | Extra requests wait for a slot until their deadline, then raise `OperationTimeoutError`. |
-| Offloaded jobs per tenant | `TenantPolicy.max_concurrent_cpu_jobs` (4) | Extra jobs wait for a slot. |
-| Offloaded jobs overall | `OffloaderConfig.max_workers` (8) and resourcera admission | Jobs wait for capacity up to `admission_wait_timeout`, then raise `ResourceAdmissionError`. |
+| Offloaded jobs per tenant | `TenantPolicy.max_concurrent_offloaded_jobs` (falls back to `OffloaderConfig.max_concurrent_jobs_per_tenant`, 4) | Extra jobs wait for a slot. |
+| Offloaded jobs overall | `OffloaderConfig.max_workers` (`auto`) and resourcera admission | Jobs wait for capacity up to `admission_wait_timeout`, then raise `ResourceAdmissionError`. |
 | CPU-bound offloaded jobs overall | `OffloaderConfig.max_cpu_jobs` (no cap) and `workload_limits` (none) | Jobs over the cap wait on the loop for a slot. Bounds GIL contention from code that holds the GIL. |
-| Units per lifecycle round | `LifecycleConfig.max_concurrency` (4) | Bounds parallel indexing. |
+| Graph extractions during ingest | `IngestionConfig.concurrency` (`auto`) | Shared by every `ingest` call of the engine. |
+| Units per lifecycle round | `LifecycleConfig.max_concurrency` (`auto`) | Bounds parallel indexing. |
 | Request duration | `request_timeout`, `method_timeout` | See [Keep the event loop responsive](../guide/how-to/event-loop-latency.md). |
 
 Per-tenant overrides go in `RetrievalConfig.tenant_policies`.
+
+### Automatic sizing
+
+The `auto` settings use an adaptive limiter. It starts at a floor (8 for
+ingestion and I/O-bound jobs, 4 for lifecycle units, `min(8, cpu_count)` for
+CPU-bound jobs) and re-evaluates every two seconds. While permits are waiting,
+it asks the resourcera `ResourceManager` how many more jobs of that workload
+the host can take and grows toward that number. It shrinks when capacity drops
+and halves on an overload signal: an offloaded job, indexing round or graph
+extraction that times out, or a backend that reports itself unavailable. It never leaves `[minimum, maximum]`, where the
+maximum defaults to the matching `EngineLimits` field. Shrinking never revokes
+permits already held; new work simply waits until enough are released.
+
+Each limiter's state appears in `health().details["concurrency"]`, with the
+resource that is currently limiting growth.
+
+### Configurable bounds
+
+Every upper bound on a setting lives in `EngineConfig.limits`
+(`EngineLimits`) and can be raised. See
+[Raise the built-in limits](../getting-started/configuration.md#raise-the-built-in-limits).
 
 ## Event-loop lag under load
 

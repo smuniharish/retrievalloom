@@ -14,6 +14,7 @@ from retrievalloom.config import (
     Components,
     ConsolidationConfig,
     EngineConfig,
+    EngineLimits,
     EngineResources,
     FailurePolicy,
     FusionConfig,
@@ -90,6 +91,7 @@ from retrievalloom.errors import (
     TenantIsolationError,
     ValidationError,
 )
+from retrievalloom.runtime.concurrency import AutoConcurrency
 from retrievalloom.runtime.offloader import OffloaderConfig
 
 if TYPE_CHECKING:
@@ -103,6 +105,7 @@ except PackageNotFoundError:  # pragma: no cover - only when running from a raw 
 __all__ = [
     "AccessDeniedError",
     "And",
+    "AutoConcurrency",
     "BackendError",
     "BackendTimeoutError",
     "BackendUnavailableError",
@@ -120,6 +123,7 @@ __all__ = [
     "DocumentInput",
     "EmbeddingValidationError",
     "EngineConfig",
+    "EngineLimits",
     "EngineResources",
     "EngineState",
     "Eq",

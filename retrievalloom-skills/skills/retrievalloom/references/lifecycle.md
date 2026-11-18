@@ -102,10 +102,11 @@ status.tasks  # {"succeeded": 2, "queued": 1}
 
 | `LifecycleConfig` field | Default | Effect |
 | --- | --- | --- |
-| `batch_size` | 128 | Documents per backend write |
-| `max_concurrency` | 4 | Index units processed at once |
+| `batch_size` | 128 | Documents per backend write, further split to the backend's `max_batch` |
+| `max_concurrency` | `auto` | Index units processed at once; sized by resourcera between 4 and `EngineLimits.max_lifecycle_concurrency` (64), or an integer |
 | `max_attempts` | 3 | Attempts per unit round for retryable errors |
-| `unit_timeout` | 600 s | Time one unit round may take |
+| `unit_timeout` | 600 s | Time one unit round may take once it starts running |
+| `housekeeping_interval` | 300 s | Time between retention and purge passes |
 | `instance_ttl`, `lease_ttl` | 120 s | Engine registration and durable reader lease lifetimes |
 | `generation_retention` | 0 s | Extra time a retired generation is kept |
 | `migration` | `auto` | `verify` only checks the metadata schema |

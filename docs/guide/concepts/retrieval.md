@@ -16,7 +16,7 @@ search still returns what it found and tells you what was skipped.
    mandatory row filter.
 2. **Plan.** The request is validated: query length (`max_query_chars`),
    `top_k` against the tenant's `max_top_k`, filter size (`max_filter_nodes`)
-   and at most 32 claims. The configuration and the per-request
+   and the number of claims (`EngineLimits.max_claims`, 32 by default). The configuration and the per-request
    `RetrievalExecutionConfig` decide which methods, reranking and NLI run.
 3. **Snapshot.** For each planned method, the engine picks the published
    generation of the scope and registers itself as a reader. Coverage gaps

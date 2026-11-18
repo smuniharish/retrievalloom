@@ -12,7 +12,7 @@ An engine takes three arguments, all optional:
 
 | Argument | Type | Holds |
 | --- | --- | --- |
-| `config` | `EngineConfig` | Settings: `ingestion`, `retrieval`, `lifecycle`, `offloader`, `log_content` |
+| `config` | `EngineConfig` | Settings: `ingestion`, `retrieval`, `lifecycle`, `offloader`, `limits`, `health_timeout`, `log_content` |
 | `components` | `Components` | Your own components. `None` fields select the defaults. |
 | `resources` | `EngineResources` | Application-owned infrastructure: `data_dir`, `resource_manager`, `executor`, `xai_runtime`, `metrics` |
 
@@ -54,8 +54,12 @@ engine = RetrievalEngine(config, resources=EngineResources(data_dir=Path("rl-dat
 ```
 
 If you prefer keyword arguments, `create_retrieval_engine(ingestion=...,
-retrieval=..., lifecycle=..., offloader=..., components=..., resources=...)`
-builds the same engine.
+retrieval=..., lifecycle=..., offloader=..., limits=..., health_timeout=...,
+components=..., resources=...)` builds the same engine.
+
+`EngineConfig.health_timeout` (default `5` seconds) bounds each component
+check that `health()` runs. Raise it when a remote backend answers health
+checks slowly.
 
 ## Control how documents are ingested
 
@@ -67,7 +71,7 @@ searchable, how invalid documents are handled, and how large one call may be.
 | `index_wait` | `all` | `all`: `ingest` and `delete` run one indexing round before returning. `none`: they return at once and indexing runs in the background. |
 | `index_wait_timeout` | `120` | Seconds `ingest` waits for that round. On timeout it returns with an `index_wait_timeout` warning; indexing continues. |
 | `failure_policy` | `per_document` | `per_document` reports invalid documents and stores the rest. `fail_batch` rejects the whole call. |
-| `concurrency` | `8` | Documents prepared concurrently. |
+| `concurrency` | `auto` | Graph extractions running at once across the engine. See [Automatic concurrency](#automatic-concurrency). |
 | `transient_metadata_keys` | `()` | Metadata keys whose change never creates a new version. It only bumps the document's `metadata_revision`. |
 | `redelivery_window_seconds` | `300` | Window for the `possible_redelivery` warning. `0` disables it. |
 | `limits` | `IngestionLimits()` | Per-call limits: documents (1000), representations (16), chunks (10000), text characters (10 000 000), tree depth (64) and nodes (50000), graph items (50000). |
@@ -93,6 +97,7 @@ merged, how many results come back, and how long a request may take.
 | `allow_stale_versions` | `False` | Keep hits that point at a superseded document version. |
 | `max_query_chars` | `4096` | Longest accepted query. |
 | `max_filter_nodes` | `64` | Largest accepted filter expression. |
+| `filter_overfetch` | `4` | When a backend cannot apply metadata filters itself, the method fetches `candidate_k` times this factor and filters afterwards. If too few hits survive, the result carries a `filter_underfetch` warning. |
 | `embedding_cache_size` | `1024` | Cached query embeddings (`0` disables the cache). |
 | `embedding_cache_ttl` | `600` | Seconds a query embedding stays cached. |
 | `fail_on_recording_error` | `False` | Raise instead of warning when the provenance recorder fails. |
@@ -112,7 +117,10 @@ Each method of the index channel (`keyword`, `fuzzy`, `sparse`, `dense`) has a
 | `on_error` | `degrade` | `degrade` turns a failure into a warning. `fail` fails the request. |
 
 `fuzzy` uses `FuzzyConfig`, which adds `score_cutoff` (85), `max_ngram` (3),
-`corpus_vocabulary` (`True`) and `min_token_length` (3).
+`matches_per_ngram` (5), `corpus_vocabulary` (`True`) and `min_token_length`
+(3). `matches_per_ngram` is how many similar vocabulary terms each query word
+expands to. Raise it when a large vocabulary holds many close spellings and
+relevant documents are missed.
 
 ### Choose how rankings are merged
 
@@ -139,11 +147,21 @@ overrides in `tenant_policies`:
 | Field | Default |
 | --- | --- |
 | `max_concurrent_requests` | `16` |
-| `max_concurrent_cpu_jobs` | `4` |
+| `max_concurrent_offloaded_jobs` | `None`: uses `OffloaderConfig.max_concurrent_jobs_per_tenant` (4) |
 | `max_top_k` | `100` |
 | `max_candidate_k` | `500` |
 | `max_ingest_batch` | `1000` |
 | `allowed_channels` | all channels |
+
+`max_candidate_k` caps the `candidate_k` of every method for that tenant. When
+it reduces a configured value, the result carries a `limit_clamped` warning of
+severity `info` naming the setting, the requested value and the applied value.
+To use a `candidate_k` above 500, raise `max_candidate_k` in the tenant policy
+as well.
+
+!!! note "Renamed in 0.2.0"
+    `max_concurrent_offloaded_jobs` was called `max_concurrent_cpu_jobs`. The
+    old name is still accepted and emits a `DeprecationWarning`.
 
 ## Control background indexing and retention
 
@@ -156,12 +174,12 @@ and history are kept. For how indexing works, see
 | --- | --- | --- |
 | `background` | `True` | Run a scheduler that indexes and maintains in the background. With `False`, indexing happens during `ingest`, `wait_for` and `run_lifecycle_once`. |
 | `poll_interval` | `2` | Seconds between background rounds. |
-| `batch_size` | `128` | Documents per backend write batch. |
-| `max_concurrency` | `4` | Index units processed concurrently. |
+| `batch_size` | `128` | Documents per backend write batch. Writes and removals are further split to the backend's own `max_batch`. |
+| `max_concurrency` | `auto` | Index units processed concurrently. See [Automatic concurrency](#automatic-concurrency). |
 | `max_attempts` | `3` | Attempts per unit round for retryable errors, and attempts per document before its coverage is marked `failed`. |
 | `retry_failed_after` | `30` | Seconds before coverage that failed with a retryable error, such as a `BackendUnavailableError` during an outage, is queued again. The delay doubles with each further failure. Non-retryable failures stay `failed` until a `backfill`. `None` disables automatic retries. |
 | `retry_failed_max_delay` | `900` | Upper bound, in seconds, of the doubling retry delay. |
-| `unit_timeout` | `600` | Seconds one unit round may take. |
+| `unit_timeout` | `600` | Seconds one unit round may take, counted from when it starts running rather than from when it is queued. |
 | `instance_ttl` | `120` | Seconds an engine instance stays registered without a heartbeat. |
 | `lease_ttl` | `120` | Seconds a durable reader lease lasts. See [Run several engines on one store](../guide/how-to/multiple-engines.md). |
 | `generation_retention` | `0` | Extra seconds a retired generation is kept before it is dropped. |
@@ -172,6 +190,7 @@ and history are kept. For how indexing works, see
 | `max_versions` | `10` | Version-history entries kept per document. Older versions that nothing references (including the `version_after` of a retained ingestion event) are pruned with their representations. `None` disables. |
 | `event_retention` | `7776000` (90 days) | Seconds committed and failed ingestion events are kept. `None` disables. |
 | `purge_log_retention` | `86400` (1 day) | Seconds purge-log entries are kept. Other engines read the log each lifecycle round to evict purged documents from their in-memory indexes; an engine that misses pruned entries rebuilds those indexes instead. Keep it well above `instance_ttl`. |
+| `housekeeping_interval` | `300` | Seconds between retention and purge passes. |
 | `migration` | `auto` | `auto` upgrades the metadata schema on start. `verify` only checks it. |
 | `shutdown_timeout` | `30` | Seconds `close` waits for in-flight work. |
 
@@ -184,7 +203,7 @@ how much of it one tenant may use. See
 
 | Field | Default |
 | --- | --- |
-| `max_workers` | `8` |
+| `max_workers` | `auto` |
 | `max_cpu_jobs` | `None` |
 | `workload_limits` | `{}` |
 | `max_concurrent_jobs_per_tenant` | `4` |
@@ -193,6 +212,93 @@ how much of it one tenant may use. See
 | `cpu_per_job` | `None` |
 | `shutdown_timeout` | `30` |
 | `resource_config` | resourcera `ResourceConfig(cpu_budget_fraction=0.05)` |
+
+## Automatic concurrency
+
+Three settings decide how much work runs at once: `IngestionConfig.concurrency`,
+`LifecycleConfig.max_concurrency` and `OffloaderConfig.max_workers`. Each
+defaults to `AutoConcurrency`, which sizes the limit from the host capacity
+that [resourcera](../integrations/resourcera.md) measures. The limit starts at
+a floor, grows while work is waiting and the host has room, shrinks when
+capacity drops, and halves when a backend times out or becomes unavailable.
+
+| Setting | Floor | Ceiling |
+| --- | --- | --- |
+| `ingestion.concurrency` | 8 | `limits.max_ingestion_concurrency` (256) |
+| `lifecycle.max_concurrency` | 4 | `limits.max_lifecycle_concurrency` (64) |
+| `offloader.max_workers` | CPU-bound jobs: `min(8, cpu_count)`, at least 2. I/O-bound jobs: 8 | `limits.max_offloader_workers` (512) |
+
+Narrow the range with `AutoConcurrency(minimum=..., maximum=...)`, or pass an
+integer to fix the limit:
+
+```python
+from retrievalloom import AutoConcurrency, EngineConfig, IngestionConfig, LifecycleConfig
+
+config = EngineConfig(
+    ingestion=IngestionConfig(concurrency=AutoConcurrency(minimum=4, maximum=32)),
+    lifecycle=LifecycleConfig(max_concurrency=8),  # fixed
+)
+```
+
+`health()` reports the current state of every limiter under
+`details["concurrency"]`, keyed `ingestion`, `lifecycle`, `offloader.cpu` and
+`offloader.io`. Each entry gives the mode, the current limit, its bounds, and
+how many permits are in use or waiting.
+
+## Raise the built-in limits
+
+`EngineConfig.limits` holds an `EngineLimits` object: the upper bounds that the
+rest of the configuration is checked against. They protect a typical
+deployment from a setting that would exhaust memory, threads or a backend.
+None of them is fixed; raise any field when your hardware and backends allow
+more.
+
+| Field | Default | Bounds |
+| --- | --- | --- |
+| `max_candidate_k` | `10000` | `candidate_k` of every method and channel |
+| `max_rerank_k` | `1000` | `reranking.rerank_k` |
+| `max_nli_k` | `200` | `nli.nli_k` |
+| `max_fuzzy_ngram` | `6` | `fuzzy.max_ngram` |
+| `max_fuzzy_matches_per_ngram` | `100` | `fuzzy.matches_per_ngram` |
+| `max_graph_depth` | `4` | `graph.depth` |
+| `max_ingestion_concurrency` | `256` | `ingestion.concurrency` |
+| `max_lifecycle_batch` | `10000` | `lifecycle.batch_size` |
+| `max_lifecycle_concurrency` | `64` | `lifecycle.max_concurrency` |
+| `max_lifecycle_attempts` | `20` | `lifecycle.max_attempts` |
+| `max_offloader_workers` | `512` | `offloader.max_workers` |
+| `max_claims` | `32` | Claims in one retrieval request |
+| `max_window_multiplier` | `20` | `consolidation.window_multiplier` |
+
+A setting above its bound fails when the configuration is built, and the
+error names the limit to raise:
+
+```text
+retrieval.channels.graph.depth=5 exceeds limits.max_graph_depth=4;
+raise EngineLimits.max_graph_depth (EngineConfig.limits) to allow it
+```
+
+```python
+from retrievalloom import (
+    ChannelsConfig,
+    EngineConfig,
+    EngineLimits,
+    GraphChannelConfig,
+    RetrievalConfig,
+)
+
+config = EngineConfig(
+    limits=EngineLimits(max_graph_depth=5, max_claims=128),
+    retrieval=RetrievalConfig(
+        channels=ChannelsConfig(graph=GraphChannelConfig(enabled=True, depth=5)),
+    ),
+)
+```
+
+Some backends have real limits of their own. A graph store reports the
+deepest traversal it supports in `IndexCapabilities.max_depth`; the bundled
+Ladybug store supports 5. `initialize` raises `ConfigurationError` when the
+configured depth exceeds it, so the problem surfaces at startup rather than
+on the first request.
 
 ## Override settings for one request
 

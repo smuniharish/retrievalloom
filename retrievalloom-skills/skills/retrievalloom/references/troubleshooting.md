@@ -22,7 +22,8 @@ for warning in result.warnings:
 | Reranking has no effect | FlashRank model files missing; the default reranker is dropped silently | Provision the model; see [rerank-and-nli.md](rerank-and-nli.md) |
 | Dense skipped with `stale_coverage` after a model change | Old vectors were built by another model | Wait for the automatic rebuild, or `rebuild` and `wait_for` it |
 | `partial_coverage` | Some documents are not indexed yet, or failed | Wait, or `backfill`; check `status().coverage` for `failed` |
-| Fewer results than `top_k` with a filter | Graph or structure filtered after search (`filter_post_applied`) | Expected; raise `candidate_k` for those channels |
+| Fewer results than `top_k` with a filter | Graph or structure filtered after search (`filter_post_applied`, `filter_underfetch`) | Raise `filter_overfetch` or `candidate_k` for those channels |
+| `ValidationError` naming `exceeds limits.max_...` | A setting is above its `EngineLimits` bound | Raise that field in `EngineConfig(limits=EngineLimits(...))` |
 | Another tenant's documents missing | Scopes are isolated | Expected; never query across scopes |
 | `ResourceAdmissionError` under load | The offloader could not reserve memory or CPU in time | Lower `OffloaderConfig.memory_per_job`, raise `admission_wait_timeout`, or reduce concurrency |
 | Qdrant local directory is locked | Local mode opens in one process | Close the other engine, or use a Qdrant server |
@@ -43,6 +44,8 @@ for warning in result.warnings:
 | `backfill_scheduled` | info | None |
 | `stale_document_version` | info; warning when kept | None; the new version appears once indexed |
 | `filter_post_applied` | info | None |
+| `filter_underfetch` | info | Raise `filter_overfetch` or `candidate_k` |
+| `limit_clamped` | info | Raise the tenant policy limit if intended |
 | `timeout_partial` | warning | Raise `request_timeout` or `method_timeout`, or lower `candidate_k` or `rerank_k` |
 | `stage_failed_degraded` | warning | Read `details`, `health()`, and the logs |
 | `evidence_truncated_contradictions` | info | None |

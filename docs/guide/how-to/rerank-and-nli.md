@@ -160,7 +160,7 @@ Candidates beyond `rerank_k` keep their fusion order below the reranked ones.
 
 An NLI model judges each candidate text (premise) against the query and every
 claim passed to `retrieve(..., claims=[...])` (hypotheses). Up to 32 claims are
-allowed per request.
+allowed per request; raise `EngineLimits.max_claims` to allow more.
 
 Subclass `NLIABC`. `judge(pairs)` returns one `NLIJudgement` per `NLIPair`, in
 order, with the pair's `hypothesis_ref`:

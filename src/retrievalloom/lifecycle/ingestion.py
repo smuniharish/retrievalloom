@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from pydantic import TypeAdapter
+from resourcera import WorkloadProfile, WorkloadRequirements
 
-from retrievalloom.config import FailurePolicy
+from retrievalloom.config import EngineLimits, FailurePolicy
 from retrievalloom.contracts.models import ExtractionSource, GraphExtraction
 from retrievalloom.domain.inputs import DocumentInput, Representation
 from retrievalloom.domain.records import (
@@ -28,7 +30,14 @@ from retrievalloom.domain.records import (
 )
 from retrievalloom.domain.reports import DeleteReport, DocumentIngestResult, IngestReport
 from retrievalloom.domain.retrieval import RetrievalWarning, Severity, WarningCode
-from retrievalloom.errors import RetrievalLoomError, ValidationError, VersionConflictError
+from retrievalloom.errors import (
+    BackendTimeoutError,
+    BackendUnavailableError,
+    OperationTimeoutError,
+    RetrievalLoomError,
+    ValidationError,
+    VersionConflictError,
+)
 from retrievalloom.index.text import track_keyword_changes
 from retrievalloom.lifecycle.canonical import (
     CanonicalDocument,
@@ -48,9 +57,10 @@ from retrievalloom.lifecycle.derivation import (
     lineage_for,
     recompute_aggregates,
 )
+from retrievalloom.runtime.concurrency import AdaptiveLimiter
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import AsyncIterator, Mapping, Sequence
 
     from retrievalloom.config import IngestionConfig
     from retrievalloom.contracts.models import (
@@ -67,6 +77,10 @@ _CONFLICT_RETRIES = 5
 # Documents per write transaction: large enough to amortise round trips, small enough
 # not to hold the write lock (one writer on SQLite) for long.
 _WRITE_CHUNK = 200
+# Automatic graph-extraction concurrency: extractors are usually remote models, so the
+# floor allows overlap even when the host looks busy.
+INGESTION_FLOOR = 8
+INGESTION_REQUIREMENTS = WorkloadRequirements(memory="16MB", profile=WorkloadProfile.IO_BOUND)  # type: ignore[arg-type]
 
 
 @dataclass(slots=True)
@@ -116,12 +130,35 @@ class IngestionService:
         clock: Clock,
         logger: Any,
         graph: GraphDerivation | None = None,
+        limiter: AdaptiveLimiter | None = None,
     ) -> None:
         self._store = store
         self._config = config
         self._clock = clock
         self._logger = logger
         self._graph = graph
+        self._limiter = limiter or AdaptiveLimiter.from_setting(
+            "ingestion",
+            config.concurrency,
+            floor=INGESTION_FLOOR,
+            ceiling=EngineLimits().max_ingestion_concurrency,
+            requirements=INGESTION_REQUIREMENTS,
+        )
+
+    @property
+    def limiter(self) -> AdaptiveLimiter:
+        """Limiter bounding graph extraction across ``ingest`` calls."""
+        return self._limiter
+
+    @contextlib.asynccontextmanager
+    async def _extraction_slot(self) -> AsyncIterator[None]:
+        """Hold an extraction permit; dependency overload halves an automatic limit."""
+        async with self._limiter.slot():
+            try:
+                yield
+            except (BackendTimeoutError, BackendUnavailableError, OperationTimeoutError) as exc:
+                self._limiter.signal_overload(f"graph extraction raised {type(exc).__name__}")
+                raise
 
     # ingest ---------------------------------------------------------------------------
     async def ingest(self, documents: Sequence[DocumentInput], scope: Scope) -> IngestReport:
@@ -190,10 +227,9 @@ class IngestionService:
         if derivation is None:
             graphs = dict.fromkeys((position for position, _ in items), None)
         else:
-            semaphore = asyncio.Semaphore(self._config.concurrency)
 
             async def prepare(position: int, item: CanonicalDocument) -> None:
-                async with semaphore:
+                async with self._extraction_slot():
                     try:
                         graphs[position] = await self._normalized_graph(item, derivation)
                     except RetrievalLoomError as exc:
@@ -332,10 +368,9 @@ class IngestionService:
         if not todo:
             return 0
         graphs: dict[str, NormalizedGraph | None] = {}
-        semaphore = asyncio.Semaphore(self._config.concurrency)
 
         async def extract(document: DocumentRecord) -> None:
-            async with semaphore:
+            async with self._extraction_slot():
                 uid = document.document_uid
                 try:
                     graphs[uid] = await self._graph_of(

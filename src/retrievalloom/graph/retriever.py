@@ -62,6 +62,11 @@ class NeighborhoodGraphRetriever(GraphRetrieverABC):
         """Component identity."""
         return self._info
 
+    @property
+    def depth(self) -> int:
+        """Entity hops expanded around the seeds."""
+        return self._depth
+
     def terms(self, query: str) -> list[str]:
         """Query n-grams (1..``max_ngram`` tokens), longest first."""
         tokens = self._tokenizer.tokenize_one(query)

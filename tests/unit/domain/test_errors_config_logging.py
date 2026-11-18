@@ -83,7 +83,7 @@ def test_ingestion_config_rejects_unknown_hash_profile() -> None:
     ("model", "payload"),
     [
         (IngestionConfig, {"concurrency": 0}),
-        (IngestionConfig, {"concurrency": 257}),
+        (EngineConfig, {"ingestion": {"concurrency": 257}}),
         (IngestionConfig, {"index_wait_timeout": 0}),
         (IngestionConfig, {"index_wait": "some"}),
         (MethodConfig, {"weight": float("inf")}),

@@ -21,6 +21,8 @@ Look up the `code` of each warning:
 | `backfill_scheduled` | info | `missing_index_policy="schedule_backfill"` or failed coverage queued a backfill. | None. |
 | `stale_document_version` | info, or warning when kept | Hits of a superseded document version were dropped, or kept with `allow_stale_versions=True`. | None; the new version appears once it is indexed. |
 | `filter_post_applied` | info | A method without filter pushdown (graph, structure) was filtered after the search. | None. Expect fewer results with selective filters. |
+| `filter_underfetch` | info | A method without filter pushdown returned its whole over-fetched window, yet fewer than `candidate_k` hits matched the filter. | Raise `RetrievalConfig.filter_overfetch` or the method's `candidate_k`. |
+| `limit_clamped` | info | The tenant policy reduced a configured value, for example `candidate_k` above `TenantPolicy.max_candidate_k`. | Raise the limit in the tenant policy if the larger value is intended. |
 | `timeout_partial` | warning | The request deadline was reached; finished stages were used. | Raise `request_timeout`/`method_timeout`, or reduce `candidate_k`/`rerank_k`. |
 | `stage_failed_degraded` | warning | A method, reranking, NLI or post-write indexing failed and `on_error="degrade"`. | Read `details`; check `health()` and the logs. |
 | `evidence_truncated_contradictions` | info | Linked contradicting evidence was added beyond `top_k`. | None. |

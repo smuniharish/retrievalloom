@@ -253,6 +253,8 @@ class WarningCode(StrEnum):
     FILTER_POST_APPLIED = "filter_post_applied"
     POSSIBLE_REDELIVERY = "possible_redelivery"
     INDEX_WAIT_TIMEOUT = "index_wait_timeout"
+    LIMIT_CLAMPED = "limit_clamped"
+    FILTER_UNDERFETCH = "filter_underfetch"
 
 
 class Severity(StrEnum):

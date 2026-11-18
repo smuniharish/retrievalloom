@@ -84,7 +84,7 @@ for item in result.evidence:
         ...  # sources disagree: show both sides
 ```
 
-- Up to 32 claims per request. The query and each claim are hypotheses; each
+- Up to 32 claims per request (`EngineLimits.max_claims`; raise it for more). The query and each claim are hypotheses; each
   candidate text is a premise.
 - `has_contradiction` is true when one candidate entails a hypothesis and
   another contradicts it. Linked contradicting evidence is kept even past

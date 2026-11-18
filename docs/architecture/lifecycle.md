@@ -34,7 +34,8 @@ refresh:
    coverage is pending, documents lack coverage rows, or a rebuild task is
    open. Each lagging pair becomes a refresh-engine resource.
 2. **Processing.** `UnitIndexer.run(scope, unit)` runs for each resource, at
-   most `max_concurrency` at a time, each bounded by `unit_timeout` and retried
+   most `max_concurrency` at a time (automatic by default), each bounded by
+   `unit_timeout` from the moment it starts running, and retried
    up to `max_attempts` times. One lock per (scope, unit, instance) serializes
    work on a unit within an engine.
    - Missing coverage rows are created for documents changed after the unit's

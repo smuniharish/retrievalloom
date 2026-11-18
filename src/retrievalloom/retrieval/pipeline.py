@@ -102,6 +102,7 @@ class PipelineComponents:
     embedding_cache: CacheABC | None = None
     schedule_backfill: BackfillScheduler | None = None
     log_content: bool = False
+    max_claims: int = 32
 
 
 @dataclass(slots=True)
@@ -221,7 +222,7 @@ class RetrievalPipeline:
         """Run ``request``; ``row_filter`` is the access policy's mandatory filter."""
         started = time.perf_counter()
         config = self._c.config
-        validate_request(request, config)
+        validate_request(request, config, max_claims=self._c.max_claims)
         plan = resolve_plan(
             request,
             config,
@@ -366,7 +367,7 @@ class RetrievalPipeline:
             _with_scores(candidate, method_fusion=fused_scores[candidate.object_id])
             if candidate.object_id in fused_scores
             else candidate
-            for candidate in batch.candidates
+            for candidate in self._post_filter(run, snapshot, hits, batch.candidates)
         ]
         positions = _channel_positions(hits, fused_index, self._c.units)
 
@@ -525,7 +526,8 @@ class RetrievalPipeline:
         request = run.request
         planned = ready.planned
         unit = planned.unit
-        scope, generation, limit = request.scope, ready.generation_id, planned.candidate_k
+        scope, generation = request.scope, ready.generation_id
+        limit = self._fetch_limit(run, ready)
         filters = run.filters if unit.backend.capabilities.filter_pushdown else None
         match unit.method:
             case IndexMethod.KEYWORD.value:
@@ -597,7 +599,57 @@ class RetrievalPipeline:
             if hit.object_ref.object_id not in seen:
                 seen.add(hit.object_ref.object_id)
                 kept.append(hit)
-        return kept[: ready.planned.candidate_k]
+        return kept[: self._fetch_limit(run, ready)]
+
+    def _fetch_limit(self, run: _Run, ready: ReadyMethod) -> int:
+        """Hits to request: ``candidate_k``, over-fetched when filters apply afterwards."""
+        planned = ready.planned
+        if run.filters is not None and not planned.unit.backend.capabilities.filter_pushdown:
+            return planned.candidate_k * self._c.config.filter_overfetch
+        return planned.candidate_k
+
+    def _post_filter(
+        self,
+        run: _Run,
+        snapshot: Snapshot,
+        hits: Mapping[str, Sequence[RetrievalHit]],
+        candidates: list[Candidate],
+    ) -> list[Candidate]:
+        """Keep each over-fetching method's best ``candidate_k`` survivors.
+
+        Warns with ``FILTER_UNDERFETCH`` when a method returned its full over-fetched
+        window yet fewer than ``candidate_k`` of its hits passed the filter.
+        """
+        if run.filters is None:
+            return candidates
+        survivors = {candidate.object_id for candidate in candidates}
+        allowed: set[str] = set()
+        short: list[str] = []
+        for ready in snapshot.methods:
+            name = ready.planned.name
+            unit_hits = hits.get(name)
+            if unit_hits is None:
+                continue
+            kept = [
+                hit.object_ref.object_id
+                for hit in unit_hits
+                if hit.object_ref.object_id in survivors
+            ]
+            k = ready.planned.candidate_k
+            allowed.update(kept[:k])
+            limit = self._fetch_limit(run, ready)
+            if limit > k and len(unit_hits) >= limit and len(kept) < k:
+                short.append(name)
+        if short:
+            run.warn(
+                WarningCode.FILTER_UNDERFETCH,
+                "a selective filter left fewer than candidate_k candidates for some methods",
+                severity=Severity.INFO,
+                methods=sorted(short),
+                filter_overfetch=self._c.config.filter_overfetch,
+                hint="raise RetrievalConfig.filter_overfetch or use a backend with filter pushdown",
+            )
+        return [candidate for candidate in candidates if candidate.object_id in allowed]
 
     async def _normalize(self, hits: Sequence[RetrievalHit]) -> dict[str, float]:
         entries = _ranked(hits)

@@ -115,9 +115,12 @@ class LadybugGraphStore(GraphStoreABC):
 
     @property
     def capabilities(self) -> IndexCapabilities:
-        """Mutable in place; durable when file-backed."""
+        """Mutable in place; durable when file-backed; traverses up to five hops."""
         return IndexCapabilities(
-            mutable_in_place=True, durable=self._path is not None, filter_pushdown=False
+            mutable_in_place=True,
+            durable=self._path is not None,
+            filter_pushdown=False,
+            max_depth=_MAX_DEPTH,
         )
 
     def _open(self) -> None:

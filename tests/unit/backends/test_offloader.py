@@ -37,8 +37,13 @@ class FakeManager:
             await asyncio.Event().wait()
         return SimpleNamespace(id=f"lease-{len(self.requirements)}")
 
+    config = SimpleNamespace(max_concurrency=64)
+
     async def release(self, lease: Any) -> None:
         self.released.append(lease.id)
+
+    async def recommend_concurrency(self, *_: Any, **__: Any) -> Any:
+        return SimpleNamespace(estimated_limit=None, limiting_resource=None)
 
 
 def fake(manager: FakeManager) -> ResourceManager:

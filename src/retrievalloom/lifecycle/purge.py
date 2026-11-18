@@ -249,7 +249,7 @@ class DocumentEraser:
                     if generation.channel == unit.channel and generation.method == unit.method
                 ]
             for generation_id in generations:
-                await unit.backend.remove(scope, generation_id, object_ids)
+                await self._indexer.remove_objects(scope, unit, generation_id, object_ids)
 
     async def _queue_rebuild(self, scope: Scope, units: Sequence[IndexUnit]) -> str:
         now = self._clock()

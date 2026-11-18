@@ -21,7 +21,9 @@ from refresh_engine import (
     RetryConfig,
     TimeoutConfig,
 )
+from resourcera import WorkloadProfile, WorkloadRequirements
 
+from retrievalloom.config import EngineLimits
 from retrievalloom.domain.hashing import random_id
 from retrievalloom.domain.records import (
     CoverageState,
@@ -41,6 +43,7 @@ from retrievalloom.errors import (
     VersionConflictError,
 )
 from retrievalloom.lifecycle.indexer import task_units
+from retrievalloom.runtime.concurrency import AdaptiveLimiter
 from retrievalloom.storage.refresh_state import MetadataStateStore
 
 if TYPE_CHECKING:
@@ -65,7 +68,9 @@ RETRYABLE = (
 )
 _TERMINAL = {TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED}
 _STATE_NAMESPACE = "lifecycle"
-_HOUSEKEEPING_INTERVAL = timedelta(minutes=5)
+# Automatic lifecycle concurrency: index units mix CPU (tokenising, encoding) and I/O.
+LIFECYCLE_FLOOR = 4
+LIFECYCLE_REQUIREMENTS = WorkloadRequirements(cpu=0.5, memory="64MB", profile=WorkloadProfile.MIXED)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +129,7 @@ class LifecycleCoordinator:
         clock: Clock,
         logger: Any,
         eraser: DocumentEraser | None = None,
+        limiter: AdaptiveLimiter | None = None,
     ) -> None:
         self._store = store
         self._indexer = indexer
@@ -134,6 +140,14 @@ class LifecycleCoordinator:
         self._clock = clock
         self._logger = logger
         self._eraser = eraser
+        self._limiter = limiter or AdaptiveLimiter.from_setting(
+            "lifecycle",
+            config.max_concurrency,
+            floor=LIFECYCLE_FLOOR,
+            ceiling=EngineLimits().max_lifecycle_concurrency,
+            requirements=LIFECYCLE_REQUIREMENTS,
+        )
+        self._housekeeping_interval = timedelta(seconds=config.housekeeping_interval)
         self._started_at = clock()
         self._housekept_at = datetime.min.replace(tzinfo=UTC)
         self._retried_at = datetime.min.replace(tzinfo=UTC)
@@ -145,14 +159,15 @@ class LifecycleCoordinator:
             _UnitOperation(self),
             store=MetadataStateStore(store, _STATE_NAMESPACE),
             config=RefreshConfig(
-                max_concurrency=config.max_concurrency,
+                # refresh-engine schedules up to the ceiling; the limiter admits units.
+                max_concurrency=self._limiter.maximum,
                 retry=RetryConfig(
                     max_attempts=config.max_attempts,
                     initial_delay=0.05,
                     max_delay=2.0,
                     retryable_exceptions=RETRYABLE,
                 ),
-                timeout=TimeoutConfig(operation=config.unit_timeout),
+                timeout=TimeoutConfig(),
             ),
         )
 
@@ -185,7 +200,20 @@ class LifecycleCoordinator:
         target = self._targets.get(rid)
         if target is None:
             raise LifecycleError("unknown lifecycle resource", details={"resource_id": rid})
-        await self._indexer.run(target.scope, target.unit)
+        async with self._limiter.slot():
+            try:
+                # The deadline starts once a permit is held, so queueing never times out.
+                async with asyncio.timeout(self._config.unit_timeout):
+                    await self._indexer.run(target.scope, target.unit)
+            except TimeoutError as exc:
+                self._limiter.signal_overload("indexing timed out")
+                raise OperationTimeoutError(
+                    "index unit round timed out",
+                    details={"unit": target.unit.name, "timeout": self._config.unit_timeout},
+                ) from exc
+            except (BackendTimeoutError, BackendUnavailableError, OperationTimeoutError) as exc:
+                self._limiter.signal_overload(f"indexing raised {type(exc).__name__}")
+                raise
 
     # rounds -----------------------------------------------------------------------------
     async def run_once(self, scope: Scope | None = None) -> RefreshResult:
@@ -379,7 +407,7 @@ class LifecycleCoordinator:
     async def tick(self) -> None:
         """One background round: maintenance, then indexing."""
         try:
-            due = self._clock() - self._housekept_at >= _HOUSEKEEPING_INTERVAL
+            due = self._clock() - self._housekept_at >= self._housekeeping_interval
             await self.maintain(housekeeping=due)
             await self.run_once()
         except Exception as exc:

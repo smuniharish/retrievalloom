@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 
 import retrievalloom.engine as engine_module
 from retrievalloom import (
@@ -21,6 +22,7 @@ from retrievalloom import (
     ConfigurationError,
     ConsolidationConfig,
     DocumentInput,
+    EngineLimits,
     Eq,
     FuzzyConfig,
     GraphChannelConfig,
@@ -42,12 +44,14 @@ from retrievalloom import (
     StructureRepresentation,
     TenantIsolationError,
     TextRepresentation,
+    ValidationError,
     WarningCode,
 )
 from retrievalloom.domain.records import Channel
 from retrievalloom.evidence.consolidation import HierarchicalConsolidator
 from retrievalloom.evidence.fusion import RRFFusion
 from retrievalloom.evidence.rerank import FlashRankReranker
+from retrievalloom.index.sparse import BM25sIndex
 from retrievalloom.retrieval.pipeline import RetrievalPipeline
 from tests.fakes import CapitalizedExtractor, HashEmbedding, OverlapReranker, RuleNLI
 from tests.unit.retrieval.helpers import (
@@ -55,6 +59,7 @@ from tests.unit.retrieval.helpers import (
     GLOBEX,
     DictCache,
     RecordingRecorder,
+    build_engine,
     chunks_doc,
     opened,
     runtime,
@@ -67,6 +72,7 @@ if TYPE_CHECKING:
 
     from retrievalloom import RetrievalEngine, RetrievalResult
     from retrievalloom.contracts.evidence import FusedEntry, RankedEntry
+    from retrievalloom.contracts.indexes import IndexCapabilities, IndexItem, WriteReport
     from retrievalloom.contracts.models import NLIPair, RerankItem, RerankScore
     from retrievalloom.domain.retrieval import NLIJudgement, RetrievalHit
 
@@ -732,3 +738,105 @@ async def test_graph_and_structure_channels_are_tenant_isolated() -> None:
     assert channels == {Channel.INDEX, Channel.GRAPH, Channel.STRUCTURE}
     post = _warning(filtered, WarningCode.FILTER_POST_APPLIED)
     assert post.details == {"methods": ["graph.graph", "structure.structure"]}
+
+
+class _NarrowSparse(BM25sIndex):
+    """BM25 without filter pushdown that accepts at most two items per call."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.batches: list[int] = []
+        self.removed: list[int] = []
+
+    @property
+    def capabilities(self) -> IndexCapabilities:
+        return super().capabilities.model_copy(update={"filter_pushdown": False, "max_batch": 2})
+
+    async def write(
+        self, scope: Scope, generation_id: str, items: Sequence[IndexItem]
+    ) -> WriteReport:
+        self.batches.append(len(items))
+        return await super().write(scope, generation_id, items)
+
+    async def remove(self, scope: Scope, generation_id: str, object_ids: Sequence[str]) -> int:
+        self.removed.append(len(object_ids))
+        return await super().remove(scope, generation_id, object_ids)
+
+
+async def test_post_filtered_methods_over_fetch_and_report_underfetch() -> None:
+    sparse = _NarrowSparse()
+    config = RetrievalConfig(
+        filter_overfetch=2,
+        channels=ChannelsConfig(
+            index=IndexChannelConfig(
+                keyword=MethodConfig(enabled=False),
+                fuzzy=FuzzyConfig(enabled=False),
+                sparse=MethodConfig(candidate_k=2),
+            )
+        ),
+    )
+    docs = [text_doc(f"d{i}", f"alpha report {i}", team="b") for i in range(6)]
+    docs.append(text_doc("hit", "alpha alpha alpha report", team="a"))
+    docs.append(chunks_doc("long", *(f"gamma {i}" for i in range(5)), team="c"))
+    async with opened(retrieval=config, components=Components(sparse_index=sparse)) as engine:
+        await engine.ingest(docs, scope=ACME)
+        assert max(sparse.batches) <= 2  # incremental writes honour max_batch
+        await engine.delete(["long"], scope=ACME)
+        assert sparse.removed
+        assert max(sparse.removed) <= 2
+        assert sum(sparse.removed) >= 5
+        found = await engine.retrieve("alpha", scope=ACME, filters=Eq(field="team", value="a"))
+        rare = await engine.retrieve("report", scope=ACME, filters=Eq(field="team", value="z"))
+        health = await engine.health()
+    # the best hit is the only team "a" document; over-fetching (2 x 2) still finds it
+    assert [s.document_id for e in found.evidence for s in e.sources] == ["hit"]
+    short = _warning(rare, WarningCode.FILTER_UNDERFETCH)
+    assert short.severity == Severity.INFO
+    assert short.details["methods"] == [SPARSE]
+    assert short.details["filter_overfetch"] == 2
+    concurrency = health.details["concurrency"]
+    assert isinstance(concurrency, dict)
+    assert {"offloader.cpu", "offloader.io", "ingestion", "lifecycle"} <= set(concurrency)
+    assert all(state["mode"] == "auto" for state in concurrency.values())  # type: ignore[index]
+
+
+@pytest.mark.graph
+async def test_graph_depth_beyond_the_store_is_rejected_at_initialize() -> None:
+    deep = RetrievalConfig(channels=ChannelsConfig(graph=GraphChannelConfig(enabled=True, depth=6)))
+    with pytest.raises(PydanticValidationError, match="max_graph_depth"):
+        build_engine(retrieval=deep)
+    engine = build_engine(retrieval=deep, limits=EngineLimits(max_graph_depth=6))
+    with pytest.raises(ConfigurationError, match="graph traversal depth") as caught:
+        await engine.initialize()
+    assert caught.value.details["max_depth"] == 5
+    await engine.close()
+
+
+async def test_claims_and_fuzzy_matches_follow_configured_limits() -> None:
+    claims = [f"claim {i}" for i in range(40)]
+    async with opened() as engine:
+        await engine.ingest([text_doc("a", "claims text")], scope=ACME)
+        with pytest.raises(ValidationError, match="claims"):
+            await engine.retrieve("claims", scope=ACME, claims=claims)
+    async with opened(limits=EngineLimits(max_claims=64)) as engine:
+        await engine.ingest([text_doc("a", "claims text")], scope=ACME)
+        await engine.retrieve("claims", scope=ACME, claims=claims)
+
+    docs = [text_doc(f"d{c}", f"retrieva{c}") for c in "bcdefg"]
+    found: dict[int, int] = {}
+    for kept in (1, 10):
+        fuzzy_only = RetrievalConfig(
+            channels=ChannelsConfig(
+                index=IndexChannelConfig(
+                    keyword=MethodConfig(enabled=False),
+                    sparse=MethodConfig(enabled=False),
+                    fuzzy=FuzzyConfig(matches_per_ngram=kept),
+                )
+            )
+        )
+        async with opened(retrieval=fuzzy_only) as engine:
+            await engine.ingest(docs, scope=ACME)
+            result = await engine.retrieve("retrievax", scope=ACME, top_k=10)
+            found[kept] = len(result.evidence)
+    assert found[1] == 1
+    assert found[10] == len(docs)

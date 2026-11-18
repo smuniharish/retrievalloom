@@ -363,7 +363,7 @@ class UnitIndexer:
             if not deleted:
                 return
             if object_ids:
-                await unit.backend.remove(scope, generation_id, object_ids)
+                await self.remove_objects(scope, unit, generation_id, object_ids)
             async with self._store.transaction(scope, write=True) as transaction:
                 now = self._clock()
                 current = await transaction.get_documents_by_uid(
@@ -417,7 +417,7 @@ class UnitIndexer:
                 return False
             object_ids = sorted({oid for entry in entries for oid in entry.object_ids})
             for generation_id in generations:
-                await unit.backend.remove(scope, generation_id, object_ids)
+                await self.remove_objects(scope, unit, generation_id, object_ids)
             head = entries[-1].seq
         if head == seen:
             return True
@@ -526,8 +526,21 @@ class UnitIndexer:
     async def _write(
         self, scope: Scope, unit: IndexUnit, generation_id: str, objects: Sequence[DerivedObject]
     ) -> None:
-        items = await self._preparer.items(unit, objects, tenant=scope.tenant_id)
-        await unit.backend.write(scope, generation_id, items)
+        """Prepare and write ``objects`` in chunks of the backend's ``max_batch``."""
+        size = unit.backend.capabilities.max_batch
+        for start in range(0, len(objects), size):
+            chunk = objects[start : start + size]
+            items = await self._preparer.items(unit, chunk, tenant=scope.tenant_id)
+            await unit.backend.write(scope, generation_id, items)
+
+    @staticmethod
+    async def remove_objects(
+        scope: Scope, unit: IndexUnit, generation_id: str, object_ids: Sequence[str]
+    ) -> None:
+        """Remove ``object_ids`` in chunks of the backend's ``max_batch``."""
+        size = unit.backend.capabilities.max_batch
+        for start in range(0, len(object_ids), size):
+            await unit.backend.remove(scope, generation_id, list(object_ids[start : start + size]))
 
     async def _publish(
         self,
@@ -721,7 +734,7 @@ class UnitIndexer:
                 raise
             stale = await self._commit_incremental(scope, unit, generation_id, work)
             if stale:
-                await unit.backend.remove(scope, generation_id, stale)
+                await self.remove_objects(scope, unit, generation_id, stale)
 
     async def _commit_incremental(
         self,

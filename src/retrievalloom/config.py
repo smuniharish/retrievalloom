@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 
 from retrievalloom.domain.base import FrozenModel, Identifier
 from retrievalloom.domain.hashing import HASH_PROFILE, SUPPORTED_HASH_PROFILES
 from retrievalloom.domain.records import Channel, IndexMethod, MissingIndexPolicy
-from retrievalloom.runtime.offloader import OffloaderConfig
+from retrievalloom.runtime.concurrency import AutoConcurrency, Concurrency
+from retrievalloom.runtime.offloader import DEFAULT_MAX_WORKERS, OffloaderConfig
 
 if TYPE_CHECKING:
     from concurrent.futures import Executor
@@ -68,6 +70,45 @@ class IndexWait(StrEnum):
     ALL = "all"
 
 
+class EngineLimits(FrozenModel):
+    """Upper bounds the configuration is validated against.
+
+    The defaults protect a typical deployment from settings that would exhaust memory,
+    threads or a backend. Raise any of them when your hardware and backends allow
+    more; every field accepts any positive integer.
+
+    Attributes:
+        max_candidate_k: Highest ``candidate_k`` of a retrieval method.
+        max_rerank_k: Highest ``reranking.rerank_k``.
+        max_nli_k: Highest ``nli.nli_k``.
+        max_fuzzy_ngram: Highest fuzzy ``max_ngram``.
+        max_fuzzy_matches_per_ngram: Highest fuzzy ``matches_per_ngram``.
+        max_graph_depth: Highest graph traversal ``depth`` (a graph store may
+            support less; ``initialize`` checks it).
+        max_ingestion_concurrency: Highest ingestion concurrency.
+        max_lifecycle_batch: Highest lifecycle ``batch_size``.
+        max_lifecycle_concurrency: Highest lifecycle concurrency.
+        max_lifecycle_attempts: Highest lifecycle ``max_attempts``.
+        max_offloader_workers: Highest offloader ``max_workers``.
+        max_claims: Most claims one retrieval request may carry.
+        max_window_multiplier: Highest consolidation ``window_multiplier``.
+    """
+
+    max_candidate_k: int = Field(default=10_000, ge=1)
+    max_rerank_k: int = Field(default=1000, ge=1)
+    max_nli_k: int = Field(default=200, ge=1)
+    max_fuzzy_ngram: int = Field(default=6, ge=1)
+    max_fuzzy_matches_per_ngram: int = Field(default=100, ge=1)
+    max_graph_depth: int = Field(default=4, ge=1)
+    max_ingestion_concurrency: int = Field(default=256, ge=1)
+    max_lifecycle_batch: int = Field(default=10_000, ge=1)
+    max_lifecycle_concurrency: int = Field(default=64, ge=1)
+    max_lifecycle_attempts: int = Field(default=20, ge=1)
+    max_offloader_workers: int = Field(default=DEFAULT_MAX_WORKERS, ge=1)
+    max_claims: int = Field(default=32, ge=1)
+    max_window_multiplier: int = Field(default=20, ge=1)
+
+
 class IngestionLimits(FrozenModel):
     """Input size limits."""
 
@@ -88,7 +129,10 @@ class IngestionConfig(FrozenModel):
         transient_metadata_keys: Metadata keys that never create a new version (a change
             only bumps ``metadata_revision``).
         redelivery_window_seconds: Window of the advisory redelivery check (0 disables).
-        concurrency: Documents processed concurrently per ``ingest`` call.
+        concurrency: Graph extractions running at once across the engine.
+            ``AutoConcurrency`` (the default, also accepted as ``"auto"``) starts at 8,
+            grows while work is queued and capacity allows, and halves when the
+            extractor times out or is unavailable; an integer fixes the limit.
         failure_policy: ``per_document`` reports failures per document; ``fail_batch``
             validates the whole batch first and rejects it entirely on any invalid input.
         index_wait: Whether ``ingest`` waits for indexing.
@@ -99,7 +143,7 @@ class IngestionConfig(FrozenModel):
     hash_profile: str = HASH_PROFILE
     transient_metadata_keys: tuple[str, ...] = ()
     redelivery_window_seconds: float = Field(default=300.0, ge=0)
-    concurrency: int = Field(default=8, ge=1, le=256)
+    concurrency: Concurrency = Field(default_factory=AutoConcurrency)
     failure_policy: FailurePolicy = FailurePolicy.PER_DOCUMENT
     index_wait: IndexWait = IndexWait.ALL
     index_wait_timeout: float = Field(default=120.0, gt=0)
@@ -116,16 +160,22 @@ class MethodConfig(FrozenModel):
     """One retrieval method."""
 
     enabled: bool = True
-    candidate_k: int = Field(default=50, ge=1, le=10_000)
+    candidate_k: int = Field(default=50, ge=1)
     weight: float = Field(default=1.0, ge=0.0, allow_inf_nan=False)
     on_error: OnError = "degrade"
 
 
 class FuzzyConfig(MethodConfig):
-    """Fuzzy method settings (RapidFuzz)."""
+    """Fuzzy method settings (RapidFuzz).
+
+    Attributes:
+        matches_per_ngram: Vocabulary matches kept per query n-gram; raise it when
+            near-identical terms crowd out the ones you need.
+    """
 
     score_cutoff: float = Field(default=85.0, ge=0.0, le=100.0)
-    max_ngram: int = Field(default=3, ge=1, le=6)
+    max_ngram: int = Field(default=3, ge=1)
+    matches_per_ngram: int = Field(default=5, ge=1)
     corpus_vocabulary: bool = True
     min_token_length: int = Field(default=3, ge=1)
 
@@ -149,7 +199,7 @@ class GraphChannelConfig(MethodConfig):
     """Graph channel (disabled by default)."""
 
     enabled: bool = False
-    depth: int = Field(default=1, ge=1, le=4)
+    depth: int = Field(default=1, ge=1)
 
 
 class StructureChannelConfig(MethodConfig):
@@ -199,7 +249,7 @@ class RerankingConfig(FrozenModel):
     """
 
     enabled: bool = True
-    rerank_k: int = Field(default=50, ge=1, le=1000)
+    rerank_k: int = Field(default=50, ge=1)
     on_error: OnError = "degrade"
     model_dir: Path | None = None
     model_name: str = "ms-marco-TinyBERT-L-2-v2"
@@ -210,14 +260,14 @@ class NLIConfig(FrozenModel):
     """NLI judgements (disabled by default)."""
 
     enabled: bool = False
-    nli_k: int = Field(default=10, ge=1, le=200)
+    nli_k: int = Field(default=10, ge=1)
     on_error: OnError = "degrade"
 
 
 class ConsolidationConfig(FrozenModel):
     """Evidence consolidation (always executed)."""
 
-    window_multiplier: int = Field(default=3, ge=1, le=20)
+    window_multiplier: int = Field(default=3, ge=1)
     group_structural: bool = True
     merge_adjacent: bool = True
     span_iou_threshold: float = Field(default=0.5, gt=0.0, le=1.0)
@@ -227,18 +277,50 @@ class ConsolidationConfig(FrozenModel):
 
 
 class TenantPolicy(FrozenModel):
-    """Per-tenant limits and capabilities."""
+    """Per-tenant limits and capabilities.
+
+    Requests asking for more than ``max_candidate_k`` (or ``rerank_k``/``nli_k`` above
+    ``max_candidate_k``) are reduced to it and report a ``limit_clamped`` warning.
+
+    Attributes:
+        max_concurrent_offloaded_jobs: Offloaded jobs of the tenant running at once;
+            ``None`` uses ``OffloaderConfig.max_concurrent_jobs_per_tenant``. Also
+            accepted under its 0.1 name ``max_concurrent_cpu_jobs`` (deprecated).
+    """
 
     max_concurrent_requests: int = Field(default=16, ge=1)
-    max_concurrent_cpu_jobs: int = Field(default=4, ge=1)
+    max_concurrent_offloaded_jobs: int | None = Field(
+        default=None,
+        ge=1,
+        validation_alias=AliasChoices("max_concurrent_offloaded_jobs", "max_concurrent_cpu_jobs"),
+    )
     max_top_k: int = Field(default=100, ge=1)
     max_candidate_k: int = Field(default=500, ge=1)
     max_ingest_batch: int = Field(default=1000, ge=1)
     allowed_channels: tuple[Channel, ...] = (Channel.INDEX, Channel.GRAPH, Channel.STRUCTURE)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _renamed(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "max_concurrent_cpu_jobs" in data:
+            warnings.warn(
+                "TenantPolicy.max_concurrent_cpu_jobs is deprecated; "
+                "use max_concurrent_offloaded_jobs",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return data
+
 
 class RetrievalConfig(FrozenModel):
-    """Retrieval behaviour."""
+    """Retrieval behaviour.
+
+    Attributes:
+        filter_overfetch: Methods that cannot push filters down to their backend fetch
+            ``candidate_k * filter_overfetch`` hits so enough remain after filtering;
+            a ``filter_underfetch`` warning reports when filtering still left fewer
+            than ``candidate_k``. Raise it for selective filters.
+    """
 
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     method_fusion: FusionConfig = Field(default_factory=FusionConfig)
@@ -250,6 +332,7 @@ class RetrievalConfig(FrozenModel):
     default_top_k: int = Field(default=10, ge=1)
     max_query_chars: int = Field(default=4096, ge=1)
     max_filter_nodes: int = Field(default=64, ge=1)
+    filter_overfetch: int = Field(default=4, ge=1)
     request_timeout: float = Field(default=30.0, gt=0)
     method_timeout: float = Field(default=10.0, gt=0)
     allow_partial_on_deadline: bool = True
@@ -271,8 +354,11 @@ class LifecycleConfig(FrozenModel):
     Attributes:
         background: Run a periodic lifecycle scheduler while the engine is open.
         poll_interval: Seconds between scheduled lifecycle rounds.
-        batch_size: Documents per backend write batch.
-        max_concurrency: Index units processed concurrently.
+        batch_size: Documents per backend write batch (also capped by each backend's
+            ``capabilities.max_batch``).
+        max_concurrency: Index units processed at once. ``AutoConcurrency`` (the
+            default, also accepted as ``"auto"``) starts at 4 and follows measured CPU
+            and memory capacity; an integer fixes the limit.
         max_attempts: Attempts per unit round (refresh-engine retry), and attempts per
             document before its coverage is marked ``failed``.
         retry_failed_after: Seconds before coverage that failed with a retryable error
@@ -308,13 +394,15 @@ class LifecycleConfig(FrozenModel):
             above ``instance_ttl``.
         migration: Metadata schema policy (``auto`` or ``verify``).
         shutdown_timeout: Seconds ``close`` waits for in-flight work.
+        housekeeping_interval: Seconds between housekeeping passes (retention, purge
+            and generation cleanup) of the background lifecycle.
     """
 
     background: bool = True
     poll_interval: float = Field(default=2.0, gt=0)
-    batch_size: int = Field(default=128, ge=1, le=10_000)
-    max_concurrency: int = Field(default=4, ge=1, le=64)
-    max_attempts: int = Field(default=3, ge=1, le=20)
+    batch_size: int = Field(default=128, ge=1)
+    max_concurrency: Concurrency = Field(default_factory=AutoConcurrency)
+    max_attempts: int = Field(default=3, ge=1)
     retry_failed_after: float | None = Field(default=30.0, gt=0)
     retry_failed_max_delay: float = Field(default=900.0, gt=0)
     unit_timeout: float = Field(default=600.0, gt=0)
@@ -330,16 +418,132 @@ class LifecycleConfig(FrozenModel):
     purge_log_retention: float = Field(default=86_400.0, gt=0)
     migration: Literal["auto", "verify"] = "auto"
     shutdown_timeout: float = Field(default=30.0, gt=0)
+    housekeeping_interval: float = Field(default=300.0, gt=0)
 
 
 class EngineConfig(FrozenModel):
-    """Complete engine configuration."""
+    """Complete engine configuration.
+
+    Attributes:
+        limits: Upper bounds the other settings are checked against; raise them to
+            allow larger values.
+        health_timeout: Seconds one component health check may take before it is
+            reported unhealthy.
+    """
 
     ingestion: IngestionConfig = Field(default_factory=IngestionConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     lifecycle: LifecycleConfig = Field(default_factory=LifecycleConfig)
     offloader: OffloaderConfig = Field(default_factory=OffloaderConfig)
+    limits: EngineLimits = Field(default_factory=EngineLimits)
+    health_timeout: float = Field(default=5.0, gt=0)
     log_content: bool = False
+
+    @model_validator(mode="after")
+    def _within_limits(self) -> EngineConfig:
+        limits = self.limits
+        retrieval = self.retrieval
+        index = retrieval.channels.index
+        checks: list[tuple[str, int, str, int]] = [
+            *(
+                (
+                    f"retrieval.channels.index.{name}.candidate_k",
+                    index.method(name).candidate_k,
+                    "max_candidate_k",
+                    limits.max_candidate_k,
+                )
+                for name in IndexMethod
+            ),
+            (
+                "retrieval.channels.graph.candidate_k",
+                retrieval.channels.graph.candidate_k,
+                "max_candidate_k",
+                limits.max_candidate_k,
+            ),
+            (
+                "retrieval.channels.structure.candidate_k",
+                retrieval.channels.structure.candidate_k,
+                "max_candidate_k",
+                limits.max_candidate_k,
+            ),
+            (
+                "retrieval.reranking.rerank_k",
+                retrieval.reranking.rerank_k,
+                "max_rerank_k",
+                limits.max_rerank_k,
+            ),
+            ("retrieval.nli.nli_k", retrieval.nli.nli_k, "max_nli_k", limits.max_nli_k),
+            (
+                "retrieval.channels.index.fuzzy.max_ngram",
+                index.fuzzy.max_ngram,
+                "max_fuzzy_ngram",
+                limits.max_fuzzy_ngram,
+            ),
+            (
+                "retrieval.channels.index.fuzzy.matches_per_ngram",
+                index.fuzzy.matches_per_ngram,
+                "max_fuzzy_matches_per_ngram",
+                limits.max_fuzzy_matches_per_ngram,
+            ),
+            (
+                "retrieval.channels.graph.depth",
+                retrieval.channels.graph.depth,
+                "max_graph_depth",
+                limits.max_graph_depth,
+            ),
+            (
+                "retrieval.consolidation.window_multiplier",
+                retrieval.consolidation.window_multiplier,
+                "max_window_multiplier",
+                limits.max_window_multiplier,
+            ),
+            (
+                "lifecycle.batch_size",
+                self.lifecycle.batch_size,
+                "max_lifecycle_batch",
+                limits.max_lifecycle_batch,
+            ),
+            (
+                "lifecycle.max_attempts",
+                self.lifecycle.max_attempts,
+                "max_lifecycle_attempts",
+                limits.max_lifecycle_attempts,
+            ),
+        ]
+        for path, setting, limit_name, ceiling in (
+            (
+                "ingestion.concurrency",
+                self.ingestion.concurrency,
+                "max_ingestion_concurrency",
+                limits.max_ingestion_concurrency,
+            ),
+            (
+                "lifecycle.max_concurrency",
+                self.lifecycle.max_concurrency,
+                "max_lifecycle_concurrency",
+                limits.max_lifecycle_concurrency,
+            ),
+            (
+                "offloader.max_workers",
+                self.offloader.max_workers,
+                "max_offloader_workers",
+                limits.max_offloader_workers,
+            ),
+        ):
+            if isinstance(setting, AutoConcurrency):
+                if setting.maximum is not None:
+                    checks.append((f"{path}.maximum", setting.maximum, limit_name, ceiling))
+                if setting.minimum is not None:
+                    checks.append((f"{path}.minimum", setting.minimum, limit_name, ceiling))
+            else:
+                checks.append((path, setting, limit_name, ceiling))
+        for path, value, limit_name, ceiling in checks:
+            if value > ceiling:
+                raise ValueError(
+                    f"{path}={value} exceeds limits.{limit_name}={ceiling}; raise "
+                    f"EngineLimits.{limit_name} (EngineConfig.limits) to allow it"
+                )
+        return self
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

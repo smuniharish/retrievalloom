@@ -88,8 +88,14 @@ of another scope.
 - `durable=True` declares that data outlives the process and may be shared
   between engines. The engine then protects generations with durable reader
   leases (see [Run several engines on one store](multiple-engines.md)).
-- `filter_pushdown=False` makes the engine filter after the search and report
+- `filter_pushdown=False` makes the engine fetch `candidate_k` times
+  `RetrievalConfig.filter_overfetch`, filter after the search and report
   `filter_post_applied`.
+- `max_batch` caps how many items the engine passes to one `write` or
+  `remove` call; larger batches are split.
+- `max_depth` (graph stores) is the deepest traversal the store supports.
+  `initialize` raises `ConfigurationError` when the configured depth exceeds
+  it. `None` means no limit.
 
 Run blocking client calls through `context.offloader` (see
 [Offloading and admission](../concepts/offloading.md)).
