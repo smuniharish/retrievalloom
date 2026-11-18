@@ -68,7 +68,7 @@ Documents ingested during the outage have `failed` dense coverage. You do not
 need to act: once the store is back, the lifecycle retries them after
 `retry_failed_after` seconds, doubling the delay on each further failure, and
 the results become `complete` again. See
-[Recover from failures](concepts/lifecycle.md#recover-from-failures).
+[Failures](concepts/lifecycle.md#failures).
 
 **A newly enabled channel returns nothing.**
 The channel is still catching up on existing documents (`index_missing`).
@@ -85,10 +85,10 @@ skipped.
 Only one process can open a Qdrant local-mode directory. Close the other
 engine, or use a Qdrant server. See [Keep data on disk](how-to/durable-storage.md).
 
-**Retired generations are not dropped.**
-Another engine holds a reader lease on them. Leases expire `lease_ttl` after
-the engine's last read, or immediately when it closes. See
-[Run several engines on one store](how-to/multiple-engines.md#reader-leases).
+**An old shared index is not being removed.**
+Another engine may still be using it. Confirm all engines are healthy and
+processing lifecycle work; review `lease_ttl` if the delay is longer than
+expected. See [Run several engines on one store](how-to/multiple-engines.md).
 
 **The event loop stalls.**
 See [Keep the event loop responsive](how-to/event-loop-latency.md).

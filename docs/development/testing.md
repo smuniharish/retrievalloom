@@ -104,12 +104,10 @@ The default FlashRank reranker has no live test because its model is not in
 
 ### Event-loop lag and garbage collection
 
-The soak test measures event-loop lag while the engine is under load. A full
-garbage collection over a large heap, for example many cached torch models
-from earlier tests, can pause the loop for longer than any engine work. The
-test runs `gc.collect()` and then `gc.freeze()` before it measures, so the
-long-lived objects are left out of later collections. Do the same in
-latency-sensitive applications after loading models; see
+The soak test measures event-loop lag while the engine is under load. Garbage
+collection can contribute to pauses on a large heap, but its impact depends
+on the application's object lifetime and workload. Measure in the target
+environment before changing process-wide collector behavior; see
 [Keep the event loop responsive](../guide/how-to/event-loop-latency.md).
 
 ## Benchmarks

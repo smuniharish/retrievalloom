@@ -1,66 +1,34 @@
 # Keep the event loop responsive
 
-Keep response times low under load. RetrievalLoom never runs blocking work on
-the event loop, but your own components and Python's garbage collector can
-still stall it. This page lists each cause, its fix, and how to measure the
-result.
+RetrievalLoom offloads its blocking work, but custom components and application
+code share the event loop. Measure latency under realistic load and address
+the operation that causes stalls before changing concurrency or garbage
+collector settings.
 
-## Offload blocking calls in your components
+## Offload blocking calls
 
-Every blocking call inside a component you write (model inference, a sync
-database client, file I/O, heavy parsing) must go through
-`context.offloader.run(...)`. A call made directly in an `async def` blocks
-every request on the loop until it returns. See
-[Offloading and admission](../concepts/offloading.md).
+Do not call a synchronous model, database client or expensive function
+directly from an `async` component method. Route blocking work through
+`context.offloader.run(...)`. Await async clients directly.
 
-## Bound every request
+See [Offloading and admission](../concepts/offloading.md) for a component
+example and cancellation behavior.
 
-- `RetrievalConfig.request_timeout` (default 30 s), or
-  `RetrievalExecutionConfig(timeout=...)` per request, is the deadline for the
-  whole request.
-- `RetrievalConfig.method_timeout` bounds each retrieval method.
-- With `allow_partial_on_deadline=True`, a request that reaches its deadline
-  while methods run returns what finished, with status `partial` and a
-  `timeout_partial` warning. Otherwise it raises `OperationTimeoutError`.
-- `TenantPolicy.max_concurrent_requests` and `max_concurrent_offloaded_jobs`
-  keep one tenant from taking every slot.
-- Automatic concurrency (the default for ingestion, lifecycle and offloader
-  workers) shrinks its limits when resourcera reports the host is short of
-  capacity. Pass `AutoConcurrency(maximum=...)` to bound how far they grow.
+## Bound work
 
-## Avoid garbage-collector pauses on large heaps
+- Set a request deadline with `RetrievalConfig.request_timeout` or a
+  per-request timeout.
+- Use `method_timeout` to bound individual retrieval methods.
+- Configure per-tenant request and offloaded-job limits.
+- Use automatic concurrency by default; cap it with `AutoConcurrency` when
+  the application needs a stricter resource budget.
+- Enable partial results on a deadline only when callers can handle and
+  clearly identify incomplete evidence.
 
-Python's cyclic garbage collector runs on the thread that triggers it, often
-the event loop thread. A full collection walks every tracked object. With a
-large heap, for example several loaded torch models, one full collection can
-pause the loop for hundreds of milliseconds. Offloading does not help: the
-pause is in the interpreter.
+## Measure scheduling delay
 
-Move long-lived objects out of the collector's view after they are loaded:
-
-```python
-import gc
-
-async with RetrievalEngine(components=components) as engine:
-    # Models are loaded in the components' initialize().
-    gc.collect()
-    gc.freeze()
-    ...  # serve requests
-```
-
-`gc.freeze()` moves every object currently tracked into a permanent
-generation that later collections skip. Call it once, after models and other
-long-lived state are loaded. Objects created later are collected as usual.
-Call `gc.unfreeze()` if you unload the models.
-
-RetrievalLoom's live soak test measures event-loop lag this way: it calls
-`gc.collect()` and `gc.freeze()` before it starts probing, so the probe sees
-stalls caused by the engine rather than by the models that earlier tests left
-on the heap.
-
-## Measure it
-
-A simple probe records the worst scheduling delay of the loop:
+Run a small probe alongside the actual workload to measure how late the event
+loop resumes a scheduled task:
 
 ```python
 import asyncio
@@ -77,12 +45,11 @@ async def worst_lag(duration: float, interval: float = 0.01) -> float:
     return worst
 ```
 
-Run it as a task next to your workload. A worst lag in the tens of
-milliseconds is normal; hundreds of milliseconds point to a blocking call or a
-collector pause.
+Interpret the measurement with request latency, CPU and memory usage, and
+backend timings. Investigate synchronous work on the event loop, worker
+contention, garbage-collection pauses and slow external services before
+applying process-wide tuning.
 
-## Next steps
-
-- See the measured effect of each setting in
-  [Offloading and admission](../concepts/offloading.md#capping-cpu-bound-jobs).
-- Trace slow requests with the [Jaeger example](../../examples/observability-jaeger.md).
+Use the [Jaeger example](../../examples/observability-jaeger.md) to trace slow
+requests and [Benchmarks](../../benchmarks.md) as a reference for the
+measurement environment and limitations.

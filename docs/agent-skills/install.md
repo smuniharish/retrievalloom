@@ -99,7 +99,7 @@ test the skills, so you can leave them out.
 
     ```text
     PASS  Python 3.14.7 (>=3.12,<3.15 required)
-    PASS  retrievalloom 0.1.0 (0.1.x expected)
+    PASS  retrievalloom 0.2.0 (0.2.x expected)
     PASS  pydantic 2.14.3 (>=2.14.3,<3 required)
     ...
     PASS  extra 'postgres': asyncpg 0.32.0 (>=0.30 required)

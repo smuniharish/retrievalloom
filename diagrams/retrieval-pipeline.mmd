@@ -7,45 +7,32 @@ flowchart TB
 
     subgraph Prepare["1 · Prepare"]
         direction LR
-        authorize["Authorize<br/>access policy · row filter"]:::core
-        plan["Plan<br/>limits · methods · rerank · NLI"]:::core
-        snapshot["Snapshot<br/>published generation per method<br/>reader leases"]:::core
-        cache["Cache lookup<br/>a hit returns at once"]:::core
-        authorize --> plan --> snapshot --> cache
+        authorize["Authorize request"]:::core
+        plan["Apply request configuration"]:::core
+        cache["Check compatible cache entry"]:::core
+        authorize --> plan --> cache
     end
 
-    subgraph Search["2 · Search: methods run concurrently, each within method_timeout"]
-        direction LR
-        keyword["index.keyword"]:::provider
-        fuzzy["index.fuzzy"]:::provider
-        sparse["index.sparse"]:::provider
-        dense["index.dense"]:::provider
-        graphch["graph.graph"]:::provider
-        structure["structure.structure"]:::provider
-    end
+    search["2 · Search<br/>Configured methods run concurrently"]:::provider
 
-    subgraph Rank["3 · Rank"]
+    subgraph Rank["3 · Combine"]
         direction LR
-        methodfusion["Method fusion<br/>index-channel methods"]:::core
-        candidates["Candidates<br/>drop deleted, invisible,<br/>superseded and filtered"]:::core
-        dedup["Deduplication"]:::core
-        channelfusion["Channel fusion"]:::core
-        methodfusion --> candidates --> dedup --> channelfusion
+        candidates["Validate and combine candidates"]:::core
+        fusion["Fuse and rank results"]:::core
+        candidates --> fusion
     end
 
     subgraph Refine["4 · Refine"]
         direction LR
-        rerank["Rerank<br/>top rerank_k"]:::core
-        judge["NLI<br/>top nli_k"]:::core
-        consolidate["Consolidate · validate<br/>top_k items · contradictions"]:::core
-        record["Cache · record provenance<br/>metrics · release snapshot"]:::core
-        rerank --> judge --> consolidate --> record
+        rerank["Optional reranking and NLI"]:::core
+        cite["Validate and cite evidence"]:::core
+        rerank --> cite
     end
 
     result["RetrievalResult<br/>status · evidence · warnings · timings"]:::app
 
     request --> Prepare
-    Prepare -- "cache miss" --> Search
-    Search --> Rank
+    Prepare -- "cache miss" --> search
+    search --> Rank
     Rank --> Refine
     Refine --> result

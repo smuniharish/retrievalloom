@@ -1,7 +1,7 @@
 # Built-in components
 
 Default implementations of the [contracts](contracts.md). The engine creates the
-defaults listed in [Engine and components](../architecture/engine.md#default-components);
+defaults listed in [Engine and components](../architecture/engine.md#components);
 the others you construct and pass in `Components`.
 
 ## Text and keywords

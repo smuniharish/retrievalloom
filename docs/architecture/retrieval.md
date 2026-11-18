@@ -1,52 +1,34 @@
 # Retrieval execution
 
-Find the module behind each stage of a search, so you can read its code, replace
-it or debug it. This page maps the
-[retrieval pipeline](../guide/concepts/retrieval.md) onto modules.
+`retrieve()` runs the configured search methods for a scoped query, combines
+their candidates and returns ranked evidence with source provenance.
 
-## Modules
+![A retrieval request is authorized and planned, searches configured methods, combines and refines candidates, then returns evidence with status and warnings](../assets/diagrams/retrieval-pipeline.png){ .diagram }
 
-| Module | Role |
-| --- | --- |
-| `engine` | Authorization, the per-tenant request slot, the access policy's row filter. |
-| `retrieval.planning` | Validates the request against limits and the tenant policy; decides which methods, reranking and NLI run; builds fusion. |
-| `retrieval.snapshot` | Picks the published generation per method, checks fingerprint and coverage, registers readers and leases. |
-| `retrieval.pipeline` | `RetrievalPipeline`: runs methods, fusion, candidates, rerank, NLI, consolidation, cache and recording under one deadline. |
-| `retrieval.candidates` | Resolves hits to objects and versions; drops deleted, invisible and superseded versions and filtered objects. |
-| `evidence.fusion`, `evidence.normalizers` | Fusion strategies on ranknexus and score normalizers. |
-| `evidence.dedup` | `IdentityAndHashDeduplicator`. |
-| `evidence.rerank` | Rerank stage and `FlashRankReranker`. |
-| `evidence.consolidation` | `HierarchicalConsolidator` and NLI summaries. |
-| `evidence.validation` | Final evidence validation: provenance integrity and scope isolation, whatever the consolidator. |
-| `index.embedding` | `EmbeddingValidator`: count, dimension and finiteness checks on embeddings. |
+## Request flow
 
-## Flow of one request
+1. **Authorize and plan.** The engine checks the request scope and access
+   policy, then applies the request, tenant and engine configuration.
+2. **Select search state.** The engine uses the currently available index
+   state for the request. Cache entries are reused only when the request,
+   effective filters, configuration and search state match.
+3. **Search and combine.** Configured methods run concurrently within their
+   limits. Their candidates are combined using the configured fusion
+   strategies.
+4. **Refine evidence.** Optional reranking and NLI run when configured.
+   Evidence is validated and returned with its source and provenance.
 
-![The four phases of one retrieve call: prepare (authorize, plan, snapshot, cache lookup), search (all methods concurrently), rank (method fusion, candidates, deduplication, channel fusion) and refine (rerank, NLI, consolidation, recording)](../assets/diagrams/retrieval-pipeline.png){ .diagram }
+## Results and failures
 
-After authorization the request also takes a slot from its tenant's
-concurrency limit. The snapshot is released when the request ends, whether it
-succeeded, failed or was cancelled.
+`RetrievalResult` reports a status, evidence, warnings and timings. A missing
+or failed method is reported rather than silently treated as a successful
+search. With partial-on-deadline enabled, completed method results can be
+returned with a partial status; otherwise the request raises its timeout
+error.
 
-The whole request runs under one deadline (`request_timeout`, or `timeout` in
-`RetrievalExecutionConfig`). With `allow_partial_on_deadline=True`, a deadline
-reached while methods run returns the finished parts with `timeout_partial`.
+Every result is checked against the request scope. A cross-scope result raises
+`TenantIsolationError`; it is never converted into a warning or partial
+success.
 
-## Cache
-
-After planning and taking the snapshot, the pipeline looks up the result cache. The key
-covers the request (without `request_id` and `principal`), the effective
-filter, the snapshot (generation ids and commit sequence) and the pipeline
-configuration. Only `complete` results are stored.
-
-## Scope checks
-
-Every backend call carries the scope and generation id. When a hit returns,
-the candidate stage and the final evidence validation check that it belongs to the request scope. A
-mismatch raises `TenantIsolationError`; it is never degraded.
-
-## Warnings
-
-Each stage appends `RetrievalWarning`s to the run. The final status is computed
-from them: `empty` without evidence, `partial` with any `warning` or `error`
-severity, `complete` otherwise. See [Troubleshooting](../guide/troubleshooting.md).
+See the [retrieval concepts](../guide/concepts/retrieval.md) and
+[results and evidence reference](../api/results.md).

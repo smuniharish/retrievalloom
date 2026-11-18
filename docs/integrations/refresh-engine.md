@@ -2,29 +2,23 @@
 
 Send RetrievalLoom's metrics to your monitoring system, and understand how
 background indexing is scheduled.
-[refresh-engine](https://pypi.org/project/refresh-engine/) runs background
-indexing with retries and timeouts. You do not call it directly; the one
-contract you may implement is `MetricsSink`.
+[refresh-engine](https://pypi.org/project/refresh-engine/) supports
+background indexing, retries and timeouts. RetrievalLoom manages it
+internally; applications configure lifecycle behavior through
+`LifecycleConfig`. Applications may implement `MetricsSink` to receive
+metrics.
 
 ## How indexing rounds run
 
-The lifecycle coordinator wraps a `RefreshEngine`:
+Lifecycle settings control how often indexing runs, how many units can be
+processed concurrently, and how failed work is retried:
 
-- **Discovery** yields every (scope, index unit) pair that lags behind the
-  metadata store.
-- **Operation** runs the indexer for one pair: build or update a generation,
-  write coverage, publish.
-- **State** is kept in the metadata store (table `rl_refresh_state`), so it is
-  shared by every engine on that store.
-
-`LifecycleConfig` maps onto refresh-engine settings:
-
-| `LifecycleConfig` field | refresh-engine setting |
+| Setting | Effect |
 | --- | --- |
-| `max_concurrency` | Units processed in parallel per round. |
-| `max_attempts` | Retry attempts per unit (backoff 0.05 s to 2 s) for retryable errors. |
-| `unit_timeout` | Timeout of one unit operation. |
-| `poll_interval` | Interval of the background `AsyncScheduler` (when `background=True`). |
+| `max_concurrency` | Maximum concurrent indexing work. |
+| `max_attempts` | Attempts for retryable failures. |
+| `unit_timeout` | Maximum time allowed for one indexing operation. |
+| `poll_interval` | Interval between background indexing rounds. |
 
 A round runs on the scheduler's tick, after a write (`ingest`, `delete`), or
 when you call `engine.run_lifecycle_once(scope)`. See

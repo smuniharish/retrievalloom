@@ -14,14 +14,13 @@
   <a href="https://github.com/smuniharish/retrievalloom/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
 </p>
 
-**Find the right passage, whatever the user types, and prove where it came from.**
+**Find relevant passages across search methods, and show where each one came from.**
 
-RetrievalLoom is a hybrid retrieval library for async Python applications. One
-call searches your documents by exact keyword, by spelling-tolerant match, by
-term relevance (BM25) and by meaning, and merges the results into one ranked
-list. Every result tells you which document, which version and which passage it
-came from. It runs inside your application: there is no separate service to
-deploy.
+RetrievalLoom is an async-first hybrid retrieval library for Python
+applications. It combines keyword, typo-tolerant, BM25 and optional semantic,
+graph and structural search into ranked evidence. Each result retains its
+source document, version and passage. RetrievalLoom runs inside your
+application; it does not require a separate hosted service.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/smuniharish/retrievalloom/main/docs/assets/diagrams/architecture-overview.png" alt="RetrievalLoom architecture: your application ingests documents and sends queries to the engine, which keeps the metadata store and the index, graph and structure channels in step and returns ranked, cited evidence" width="720">
@@ -64,10 +63,10 @@ every answer must cite its source.
 - **Durable when you need it.** Keep metadata in SQLite or PostgreSQL and
   vectors in Qdrant (in memory, on disk, on a server or in Qdrant Cloud).
   Several engines can share one store.
-- **Your own components.** Swap in your own embedding model, reranker, vector
-  store or metadata store by subclassing a small base class. The pytest
-  contract kits in `retrievalloom.testing` check your implementation against
-  the same tests the built-in components pass.
+- **Your own components.** Implement the public abstract base class for an
+  embedding model, reranker, vector store, metadata store or other extension
+  point. The contract kits in `retrievalloom.testing` verify custom
+  implementations against the same requirements as built-in components.
 - **Small and typed.** An async API with type hints throughout, structured
   logging with structlog, and 100% branch coverage on Python 3.12 to 3.14.
 
@@ -297,7 +296,8 @@ npx skills add smuniharish/retrievalloom --skill retrievalloom-extend   # only t
 ```
 
 See [Install the skills](https://retrievalloom.readthedocs.io/en/latest/agent-skills/install/)
-for manual and per-agent installation.
+for manual and per-agent installation, and for skills maintained by the
+AGXAI, Qdrant and FastAPI projects.
 
 ## Scope
 

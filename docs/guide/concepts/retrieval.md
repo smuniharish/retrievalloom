@@ -8,39 +8,22 @@ search still returns what it found and tells you what was skipped.
 
 ## Stages
 
-![The four phases of one retrieve call: prepare (authorize, plan, snapshot, cache lookup), search (all methods concurrently), rank (method fusion, candidates, deduplication, channel fusion) and refine (rerank, NLI, consolidation, recording)](../../assets/diagrams/retrieval-pipeline.png){ .diagram }
+![A retrieval request is authorized and planned, searches configured methods, combines and refines candidates, then returns evidence with status and warnings](../../assets/diagrams/retrieval-pipeline.png){ .diagram }
 
 `engine.retrieve(query, scope=...)` runs these stages in order:
 
-1. **Authorize.** The access policy authorizes the call and may add a
-   mandatory row filter.
-2. **Plan.** The request is validated: query length (`max_query_chars`),
-   `top_k` against the tenant's `max_top_k`, filter size (`max_filter_nodes`)
-   and the number of claims (`EngineLimits.max_claims`, 32 by default). The configuration and the per-request
-   `RetrievalExecutionConfig` decide which methods, reranking and NLI run.
-3. **Snapshot.** For each planned method, the engine picks the published
-   generation of the scope and registers itself as a reader. Coverage gaps
-   produce warnings here.
-4. **Methods.** All methods run concurrently, each limited by `method_timeout`
-   and all by the request deadline (`request_timeout`, or `timeout` per
-   request).
-5. **Method fusion.** Index-channel methods are fused into one list.
-6. **Candidates.** Hits are resolved to objects. Deleted documents, invisible
-   versions, superseded versions and objects that fail the filter are dropped.
-7. **Deduplication and channel fusion.** Candidates of the same object or with
-   equal text are merged. Channels are fused into one order.
-8. **Rerank.** The top `rerank_k` candidates with text are rescored by the
-   reranker.
-9. **NLI.** The top `nli_k` candidates are judged against the query and each
-   claim.
-10. **Consolidation.** The best `top_k × window_multiplier` candidates are
-    grouped into evidence items. The top `top_k` items are returned, plus
-    items that contradict them, up to `contradiction_overflow` (default
-    `ceil(top_k / 2)`).
-11. **Record.** The provenance recorder receives the request and result.
-
-The snapshot is released at the end, so the generations it read cannot be
-retired while the request runs.
+1. **Authorize and validate.** The access policy authorizes the call and may
+   add a mandatory row filter. Request and tenant settings determine the
+   allowed query, filters and result size.
+2. **Search.** Enabled methods run concurrently within their method and
+   request deadlines. Results are checked against the requested scope and
+   effective filters.
+3. **Combine and rank.** Method and channel results are fused, and duplicate
+   candidates are consolidated.
+4. **Refine.** Optional reranking and NLI assess the most relevant passages.
+5. **Return evidence.** The engine returns ranked evidence with source
+   citations, provenance, status and warnings. A configured recorder receives
+   the request and result.
 
 ## Fusion
 
@@ -117,12 +100,10 @@ Always look at `result.warnings` when the status is not `complete`. The
 
 ## Caching
 
-Caching returns repeated searches instantly. `Components.cache` caches whole
-results. The default is `NoCache`. With a cache
-such as `InMemoryLRUCache`, only `complete` results are stored. The key covers
-the request (except `request_id` and `principal`), the effective filter, the
-snapshot and the pipeline configuration, so new data or a new generation
-never returns an old result.
+`Components.cache` can cache complete results; the default is `NoCache`.
+Cached results are reused only when the request, effective filter, search
+state and pipeline configuration match. Changes to documents or indexes do
+not reuse results from an older search state.
 
 Query embeddings have their own LRU cache, set by `embedding_cache_size`
 and `embedding_cache_ttl`.

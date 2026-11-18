@@ -1,101 +1,61 @@
 # Engine and components
 
-Understand what happens when you create, open and close an engine, and which
-components it creates for you. `RetrievalEngine` (`retrievalloom.engine`) is the
-only entry point. It holds the configuration, wires components, and routes each
-operation to the ingestion service, the lifecycle coordinator or the retrieval
-pipeline.
+`RetrievalEngine` is the async entry point for ingestion, retrieval and
+document lifecycle operations. It coordinates the metadata store, configured
+search channels and optional model components. Applications configure these
+through `EngineConfig`, `Components` and `EngineResources`.
 
-## States
+## Lifecycle
 
 | State | Meaning |
 | --- | --- |
-| `new` | Created; nothing started. |
-| `open` | `initialize()` (or `async with`) succeeded. Operations are accepted. |
-| `closing` | `close()` is draining in-flight operations. New operations raise `LifecycleError`. |
-| `closed` | Everything the engine owns is closed. The engine cannot be reopened. |
+| `new` | Created but not initialized. |
+| `open` | Initialization succeeded; operations are accepted. |
+| `closing` | Shutdown is in progress; new operations are rejected. |
+| `closed` | Owned resources are closed. The engine cannot be reopened. |
 
-`initialize()` is idempotent while open. `close()` is idempotent.
+Use `async with` or call `initialize()` and `close()` explicitly. Initialization
+is idempotent while the engine is open, as is shutdown. If initialization
+fails, the engine releases resources it started before propagating the error.
 
-## Startup
+## Components
 
-`initialize()` does, in order:
+Pass custom implementations through `Components`. Any component the
+application does not provide is selected from the configuration and available
+extras:
 
-1. Start the offloader (executor and resourcera manager, unless supplied).
-2. Resolve the metadata store, initialize it and run the migration policy
-   (`LifecycleConfig.migration`).
-3. Resolve every other component: supplied ones are used as is; missing ones
-   get a default or stay disabled (see below).
-4. Call `initialize(context)` on each component once, in wiring order. The
-   `ComponentContext` carries the engine id, offloader, clock, logger, metrics
-   sink, `data_dir` and the metadata store.
-5. Build one **index unit** per enabled method with a backend
-   (`index.keyword`, `index.fuzzy`, `index.sparse`, `index.dense`, `graph`,
-   `structure`). A unit fingerprints its backend and dependencies (tokenizer,
-   keyword dictionary, embedding model).
-6. Start the lifecycle coordinator: register the engine instance and, with
-   `background=True`, start the scheduler. With `auto_rebuild_ephemeral=True`
-   and either `background=False` or `wait_for_rebuild=True`, run one round
-   before returning (bounded by `rebuild_timeout` when the scheduler runs).
+| Capability | Default behavior |
+| --- | --- |
+| Metadata | In-memory SQLite by default; `data_dir` enables a local database file. |
+| Keyword, fuzzy and BM25 search | Enabled by default with built-in indexes. |
+| Semantic search | Requires an embedding model and vector store. |
+| Graph and structure search | Optional channels; enable the corresponding extra and configuration. |
+| Reranking | Uses FlashRank when enabled and its model files are available; models are not downloaded implicitly. |
+| NLI | Disabled unless an implementation is supplied. |
+| Access policy | Allows access by default. Configure a policy for application authorization. |
 
-If any step fails, everything started so far is closed and the error is
-raised.
-
-## Default components
-
-| Component | Default | Condition |
-| --- | --- | --- |
-| `metadata_store` | `SQLiteMetadataStore` (in memory, or `data_dir/metadata.db`) | Always |
-| `tokenizer` | `SimpleTokenizer` | Always |
-| `keyword_dictionary` | `MetadataKeywordDictionary` | Always |
-| `keyword_index` | `AhoCorasickKeywordIndex` | `keyword` method enabled |
-| `fuzzy_index` | `RapidFuzzIndex` | `fuzzy` method enabled |
-| `sparse_index` | `BM25sIndex` | `sparse` method enabled |
-| `embedding` | None | Supply one to enable `dense` |
-| `vector_store` | `QdrantVectorStore` (memory, or `data_dir/qdrant`) | Embedding model set and `dense` enabled |
-| `graph_store` | `LadybugGraphStore` (memory, or `data_dir/graph/graph.lbug`) | Graph channel enabled |
-| `graph_retriever` | `NeighborhoodGraphRetriever(depth=channels.graph.depth)` | Graph channel enabled |
-| `graph_normalizer` | `IdentityGraphNormalizer` | Graph channel enabled |
-| `graph_extractor` | None | Optional |
-| `structure_engine` | `TreeSearchStructureEngine` (memory, or `data_dir/structure`) | Structure channel enabled |
-| `deduplicator` | `IdentityAndHashDeduplicator` | Always |
-| `consolidator` | `HierarchicalConsolidator` | Always |
-| `method_fusion`, `channel_fusion` | Built from `FusionConfig` (RRF, `k=60`) | Always |
-| `reranker` | `FlashRankReranker` from `RerankingConfig` (`model_dir`, `model_name`); dropped at startup when the model files are missing | `RerankingConfig.enabled` |
-| `nli` | None | Supply one |
-| `cache` | `NoCache` | Always |
-| `access_policy` | `AllowAllAccessPolicy` | Always. Not a security control. |
-| `provenance_recorder` | `AgxaiProvenanceRecorder` with `EngineResources.xai_runtime`, else `NoOpProvenanceRecorder` | Always |
-
-A query-embedding LRU cache is added when an embedding model is set and
-`embedding_cache_size > 0`.
-
-Passing a `vector_store` without an `embedding` model raises
-`ConfigurationError`.
+See the [component reference](../api/components.md) and
+[configuration guide](../getting-started/configuration.md) for all built-in
+choices and settings.
 
 ## Ownership
 
-- The engine closes the components and resources it created.
-- Components and resources you pass in are initialized by the engine but never
-  closed by it. They stay yours.
-- `EngineResources` (`resource_manager`, `xai_runtime`, `executor`,
-  `data_dir`, `metrics`) is never closed or deleted.
+The engine initializes the components passed to it, but closes only the
+components and resources it creates. Application-owned components, executors,
+resource managers and metadata stores remain the application's responsibility.
+Close them after the engine has stopped using them.
 
 ## Shutdown
 
-`close()`:
-
-1. Rejects new operations.
-2. Waits up to `LifecycleConfig.shutdown_timeout` for in-flight operations and
-   background indexing rounds, then cancels what is left.
-3. Stops the coordinator and deregisters the engine instance, which deletes
-   its reader leases and the metadata rows of its ephemeral units.
-4. Closes engine-owned components in reverse wiring order, then the offloader.
+`close()` stops accepting new work, waits for in-flight operations within the
+configured shutdown timeout, and then releases engine-owned components. Work
+that cannot be interrupted in a worker thread may finish after its awaiting
+coroutine is cancelled; the offloader retains its capacity reservation until
+the thread completes.
 
 ## Identity
 
-- `engine_id` names the logical engine (pass `engine_id=` to keep it stable
-  across restarts).
-- Each `RetrievalEngine` object also has a random **instance id**. Ephemeral
-  units, reader leases and heartbeats are per instance. See
-  [Concurrency and isolation](concurrency.md).
+Use `engine_id` to identify a logical engine across restarts. Each engine
+instance also has its own runtime identity for its temporary state. See
+[Concurrency and isolation](concurrency.md) and
+[Run several engines on one store](../guide/how-to/multiple-engines.md).

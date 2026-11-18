@@ -11,15 +11,15 @@ flowchart LR
         engineB["RetrievalEngine<br/>in-memory keyword · fuzzy · sparse"]:::core
     end
 
-    postgres[("PostgreSQL metadata store<br/>documents · coverage · generations<br/>purge log · reader leases · heartbeats")]:::provider
-    qdrant[("Qdrant server<br/>shared dense generations")]:::provider
+    postgres[("PostgreSQL metadata store<br/>documents and lifecycle state")]:::provider
+    qdrant[("Qdrant server<br/>shared vector index")]:::provider
     graphdb[("Graph database server<br/>your GraphStoreABC")]:::provider
 
-    engineA <-- "per-scope advisory lock<br/>pointer compare-and-swap" --> postgres
-    engineB <-- "per-scope advisory lock<br/>pointer compare-and-swap" --> postgres
+    engineA --> postgres
+    engineB --> postgres
     engineA --> qdrant
     engineB --> qdrant
     engineA --> graphdb
     engineB --> graphdb
-    postgres -. "purge log: evict erased objects" .-> engineA
-    postgres -. "purge log: evict erased objects" .-> engineB
+    postgres -. "shared document updates" .-> engineA
+    postgres -. "shared document updates" .-> engineB

@@ -24,7 +24,7 @@ Install an extra only when you need the feature it adds:
 | --- | --- | --- |
 | `graph` | Knowledge-graph search (the graph channel), stored in [LadybugDB](https://pypi.org/project/ladybug/) | `pip install "retrievalloom[graph]"` |
 | `structure` | Section-tree search (the structure channel), with [TreeSearch](https://pypi.org/project/pytreesearch/) | `pip install "retrievalloom[structure]"` |
-| `postgres` | The [PostgreSQL metadata store](../guide/how-to/durable-storage.md#a-shared-postgresql-store), on [asyncpg](https://pypi.org/project/asyncpg/), shared by engines on several hosts | `pip install "retrievalloom[postgres]"` |
+| `postgres` | The [PostgreSQL metadata store](../guide/how-to/durable-storage.md#postgresql-metadata), on [asyncpg](https://pypi.org/project/asyncpg/), shared by engines on several hosts | `pip install "retrievalloom[postgres]"` |
 | `testing` | The pytest [contract kits](../api/testing.md) that test your own components | `pip install "retrievalloom[testing]"` |
 | `all` | `graph`, `structure` and `postgres` | `pip install "retrievalloom[all]"` |
 

@@ -6,7 +6,7 @@ the engine you can replace is defined by a small base class, called a
 it in place of the default. A ready-made test suite, the *contract kit*, then
 checks that your implementation behaves the way the engine expects.
 
-![Every contract derives from ComponentABC and is grouped as models, indexes, evidence or infrastructure, each with its built-in implementation; your subclasses replace the defaults in Components and the contract kits verify them](../../assets/diagrams/extensibility.png){ .diagram }
+![Applications choose built-in or custom models, search backends, storage and evidence components; contract kits verify custom implementations](../../assets/diagrams/extensibility.png){ .diagram }
 
 ## Implement the base members
 

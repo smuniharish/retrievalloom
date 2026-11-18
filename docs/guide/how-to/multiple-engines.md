@@ -1,16 +1,18 @@
 # Run several engines on one store
 
-Scale out by running several engines, in one process or many, against the same
-documents. Durable indexes such as vectors are built once and shared, and every
-engine sees the others' writes. The engines must share:
+Run multiple engine instances against the same corpus when an application
+needs more than one process or host. Each engine must use the same metadata
+store and the same durable backend locations and configuration.
 
-- one metadata store (for example the same SQLite file for engines on one
-  host, or a [shared PostgreSQL store](durable-storage.md#a-shared-postgresql-store)
-  for engines on several hosts), and
-- the same durable backend location (for example one Qdrant server and
-  `collection_prefix`).
+For one host, engines can share a SQLite metadata file. For multiple hosts,
+use `PostgresMetadataStore` and server-backed search stores such as Qdrant.
+Local database files may be restricted to a single process.
 
-Configure every engine the same way:
+## Configure each engine
+
+Create separate component instances for each engine. Share the underlying
+database and service locations, and use the same embedding model identity and
+dimensions in every process:
 
 ```python
 from retrievalloom import Components, RetrievalEngine
@@ -23,76 +25,40 @@ def make_engine(embedding) -> RetrievalEngine:
         components=Components(
             metadata_store=SQLiteMetadataStore("shared/metadata.db"),
             embedding=embedding,
-            vector_store=QdrantVectorStore(url="http://qdrant:6333", collection_prefix="docs"),
+            vector_store=QdrantVectorStore(
+                url="http://localhost:6333",
+                collection_prefix="docs",
+            ),
         )
     )
 ```
 
-Every engine needs its own component instances; only the underlying storage
-is shared. Use the same embedding model (same identity and dimensions) in every
-engine: a different model fingerprint makes the shared generation stale for
-that engine.
+Use PostgreSQL rather than a shared SQLite file for engines on different
+hosts. See [Keep data on disk](durable-storage.md#postgresql-metadata).
 
-## What is shared and what is not
+## What each engine keeps
 
-![Two hosts share one PostgreSQL metadata store under per-scope advisory locks, one Qdrant server and one graph database server; each keeps its own in-memory keyword, fuzzy and sparse indexes and evicts erased objects through the purge log](../../assets/diagrams/multiple-engines.png){ .diagram }
+Durable backends can be shared by all engines that use the same location.
+Keyword, fuzzy and sparse indexes are in memory, so each process keeps its own
+copy and refreshes it through lifecycle processing. Plan for the memory and
+restart cost in each process; see [Benchmarks](../../benchmarks.md).
 
-Durable indexes are shared; in-memory indexes are rebuilt by each engine from
-the shared metadata:
+Configure background lifecycle processing on every engine, or schedule
+`run_lifecycle_once()` yourself. An engine that does not process lifecycle
+work will not promptly reflect changes made by another engine in its
+in-memory indexes.
 
-| Unit | Shared between engines |
-| --- | --- |
-| Dense (Qdrant server, or another durable store) | Yes. One generation, built once. |
-| Keyword, fuzzy, sparse (in memory) | No. Each engine builds and keeps its own generation. |
-| Graph, structure | Only if every engine can open the same backend location. LadybugDB files and Qdrant local-mode directories are opened by one process at a time: a second process's `LadybugGraphStore` fails at startup with `BackendUnavailableError`. Share a graph through one owner process or a `GraphStoreABC` on a server database such as Neo4j. |
+Purges are reflected by other engines during lifecycle processing. Retrieval
+still validates candidates against current metadata, so erased documents are
+not returned while an engine is waiting to refresh its local index.
 
-Rows of an engine's in-memory generations carry its instance id. They are
-deleted when the engine closes, or by another engine's maintenance round when
-its registration expires (`LifecycleConfig.instance_ttl`, default 120 s,
-renewed by a heartbeat every round).
+## Embedded backends
 
-## Reader leases
+SQLite metadata files can be shared by processes on one host. Embedded graph
+and local vector backends may require a single process to own their data
+directory. For access from multiple hosts, use a server-backed implementation
+or route operations through one owner process.
 
-A search on one engine never loses its index because another engine rebuilt
-it. A rebuild publishes a new generation and retires the old one. The old one must
-not be dropped while another engine still reads from it. Durable reader leases
-guarantee this:
-
-- While an engine reads a durable generation, it holds a reader lease on it in
-  the metadata store, per generation and per engine instance.
-- A lease lasts `LifecycleConfig.lease_ttl` (default 120 s). The engine renews
-  it on a read when less than half the TTL remains.
-- Retiring a generation waits until no **other** engine holds an unexpired
-  lease on it. The retiring engine's own readers are tracked in process.
-- After an engine's last read, its lease can persist for up to `lease_ttl`. If
-  the engine closes, it deregisters and its leases are deleted at once.
-- Expired leases are purged by the maintenance round.
-- `LifecycleConfig.generation_retention` (default 0 s) delays the drop
-  further.
-
-In-memory backends need no leases: their generations belong to one engine.
-
-Choose `lease_ttl` longer than your longest request. A crashed engine delays
-the drop of a retired generation by at most `lease_ttl`; its registration
-and in-memory rows are purged after `instance_ttl`.
-
-## Who runs background indexing
-
-Every engine with `background=True` (the default) runs lifecycle rounds.
-Generation pointers are switched with compare-and-swap in the metadata store,
-so several schedulers on one store are safe.
-
-An engine with `LifecycleConfig(background=False)` runs rounds only when you
-ask: on its own `ingest` and `delete`, `wait_for`, and
-`run_lifecycle_once()`. Call `engine.run_lifecycle_once()` periodically, at
-least every `instance_ttl`. The round renews the engine's registration, and
-indexes documents written by other engines into its in-memory indexes.
-Without it, those documents are missing from its keyword, fuzzy and sparse
-results, and other engines purge its in-memory rows once its registration
-expires. The round also evicts documents other engines purged from its
-in-memory indexes (see [Erasure and retention](../../security.md#erasure-and-retention)).
-
-## Next steps
-
-- Choose a shared metadata store in [Keep data on disk](durable-storage.md).
-- Learn how leases protect searches in [Generations and coverage](../concepts/lifecycle.md#reader-leases).
+See [Metadata store](../../architecture/storage.md) for store choices and
+[Concurrency and isolation](../../architecture/concurrency.md) for the
+deployment guarantees.

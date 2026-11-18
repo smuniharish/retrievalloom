@@ -17,11 +17,11 @@ description: >-
   retrievalloom skill.
 license: Apache-2.0
 compatibility: >-
-  Python 3.12 to 3.14 with retrievalloom 0.1.x and its testing extra
+  Python 3.12 to 3.14 with retrievalloom 0.2.x and its testing extra
   (pip install "retrievalloom[testing]"). The templates and their tests run
   offline and download nothing.
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
   documentation: "https://retrievalloom.readthedocs.io/en/latest/guide/how-to/custom-backends/"
 ---
 

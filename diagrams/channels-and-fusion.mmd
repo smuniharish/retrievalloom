@@ -6,28 +6,26 @@ flowchart LR
     query["Query"]:::app
 
     subgraph IndexChannel["index channel"]
-        keyword["keyword<br/>AhoCorasickKeywordIndex<br/><i>error codes, product names</i>"]:::provider
-        fuzzy["fuzzy<br/>RapidFuzzIndex<br/><i>typos, partial terms</i>"]:::provider
-        sparse["sparse<br/>BM25sIndex<br/><i>questions with the right words</i>"]:::provider
-        dense["dense<br/>QdrantVectorStore + your embedding model<br/><i>paraphrases</i>"]:::provider
-        methodfusion["Method fusion<br/>RRF, k=60 · MethodConfig.weight"]:::core
+        lexical["Keyword · fuzzy · BM25<br/>exact terms and variations"]:::provider
+        semantic["Semantic search<br/>requires an embedding model"]:::provider
+        methodfusion["Combine index methods"]:::core
     end
 
     subgraph GraphChannel["graph channel · graph extra"]
-        graphch["graph<br/>LadybugGraphStore or your GraphStoreABC<br/><i>related entities</i>"]:::provider
+        graphch["Related entities and relationships"]:::provider
     end
 
     subgraph StructureChannel["structure channel · structure extra"]
-        structure["structure<br/>TreeSearchStructureEngine<br/><i>section titles</i>"]:::provider
+        structure["Document structure and sections"]:::provider
     end
 
-    channelfusion["Channel fusion<br/>RRF, k=60 · channel weight"]:::core
+    channelfusion["Combine enabled channels"]:::core
     ranked["One ranked list"]:::app
 
-    query --> keyword & fuzzy & sparse & dense
+    query --> lexical & semantic
     query --> graphch
     query --> structure
-    keyword & fuzzy & sparse & dense --> methodfusion
+    lexical & semantic --> methodfusion
     methodfusion --> channelfusion
     graphch --> channelfusion
     structure --> channelfusion

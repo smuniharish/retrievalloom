@@ -59,7 +59,7 @@ database.
   `details["path"]`) immediately; it does not wait for the lock. To share a
   graph between processes, use one owner process or a `GraphStoreABC` on a
   server database such as Neo4j. See
-  [Keep data on disk](../guide/how-to/durable-storage.md#the-graph-file-has-one-owner-process).
+  [Keep data on disk](../guide/how-to/durable-storage.md#durable-search-backends).
 
 The default retriever, `NeighborhoodGraphRetriever(depth=1, max_ngram=4,
 seed_limit=20)`, finds entities whose name or alias equals a query n-gram

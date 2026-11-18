@@ -72,8 +72,9 @@ other, and records where every result came from.
 
     ---
 
-    Swap in your own embedding model, reranker, vector store or metadata store
-    by subclassing a small base class. Contract kits test it for you.
+    Add a custom embedding model, reranker, vector store or metadata store by
+    implementing its public abstract base class. Contract kits verify the
+    implementation.
 
 </div>
 
@@ -83,7 +84,7 @@ other, and records where every result came from.
     version in the metadata store, keeps each channel's indexes in step with it,
     and answers a query by searching one consistent snapshot of every channel.
 
-    ![RetrievalLoom architecture: your application ingests documents and sends queries to the engine, which keeps the metadata store and the index, graph and structure channels in step and returns ranked, cited evidence](assets/diagrams/architecture-overview.png){ .diagram }
+    ![RetrievalLoom accepts documents and queries from an application, keeps configured search channels aligned with metadata, and returns ranked evidence with source provenance](assets/diagrams/architecture-overview.png){ .diagram }
 
 ## Thirty-second tour
 

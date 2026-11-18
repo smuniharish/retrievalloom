@@ -2,19 +2,15 @@ sequenceDiagram
     autonumber
     participant App as Your application
     participant Engine as RetrievalEngine
-    participant Ingest as IngestionService
+    participant Ingest as Ingestion
     participant Store as Metadata store
-    participant Round as Lifecycle round
-    participant Units as Index units
+    participant Index as Search methods
 
     App->>Engine: ingest(documents, scope)
-    Engine->>Engine: authorize · validate limits
+    Engine->>Engine: authorize · validate
     Engine->>Ingest: documents
-    Ingest->>Ingest: canonicalize · content hash<br/>derive chunks, sections, graph contributions
-    Ingest->>Store: write transaction per chunk of up to 200 documents<br/>document · version · representations · objects · event
-    Note over Ingest,Store: Identical content is reported as unchanged,<br/>a redelivered event as replayed.
-    Engine->>Round: run a round for the scope
-    Round->>Store: pending coverage since the unit watermark
-    Round->>Units: write new objects, remove superseded ones<br/>(or build and publish a new generation)
-    Round->>Store: coverage ready · version visible
+    Ingest->>Store: persist documents and representations
+    Engine->>Index: update enabled methods
+    Index->>Store: report readiness
     Engine-->>App: IngestReport<br/>created · updated · unchanged · revived · replayed
+    Note over Engine,Index: Pending work and failures remain visible in status and retrieval warnings.

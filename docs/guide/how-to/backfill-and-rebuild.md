@@ -27,7 +27,7 @@ print(result.state.value, result.attempts, result.error)
 - Queuing a backfill resets the units' `failed` coverage to `pending`, with
   the attempt counter at zero. Failures with a retryable error, such as a
   backend outage, are retried automatically
-  ([Recover from failures](../concepts/lifecycle.md#recover-from-failures)), so
+  ([Failures](../concepts/lifecycle.md#failures)), so
   you need a backfill only after a non-retryable failure or to retry at once.
 - The task succeeds once no selected unit has pending work left.
 

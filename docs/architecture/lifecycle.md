@@ -1,148 +1,81 @@
 # Index lifecycle
 
-This page describes the modules that keep indexes in step with the metadata
-store. For the concepts (generations, coverage, tasks, leases), read
-[Generations and coverage](../guide/concepts/lifecycle.md) first.
+The lifecycle keeps each enabled search method aligned with the documents in
+the metadata store. It supports incremental updates, rebuilding after
+configuration changes, recovery from backend failures and explicit erasure.
 
-## Modules
+## Index readiness
 
-| Module | Role |
-| --- | --- |
-| `lifecycle.canonical` | Canonicalizes a `DocumentInput`: content hash, event id and idempotency tier. |
-| `lifecycle.ingestion` | `IngestionService`: writes documents, versions, representations, events and visibility in one transaction per document. |
-| `lifecycle.derivation` | Derives objects (chunks, structure nodes, graph aggregates) from representations. |
-| `lifecycle.units` | `IndexUnit` (a method bound to its backend and fingerprint) and `ItemPreparer` (turns objects into index items, embedding them when needed). |
-| `lifecycle.indexer` | `UnitIndexer` (builds, updates, publishes, retires and reconciles generations) and `ReaderTracker` (in-process readers and durable leases). |
-| `lifecycle.coordinator` | `LifecycleCoordinator`: discovery, rounds through refresh-engine, maintenance, tasks. |
+Each search method maintains its own searchable state for a scope. A method
+may be ready, waiting for indexing, or unavailable after a failure. The
+`status()` report summarizes readiness; retrieval results include warnings
+when a planned method cannot return complete results.
 
-## A round
+For a rebuild, RetrievalLoom prepares a replacement index and switches
+searches to it only after it is ready. This prevents a query from seeing a
+half-built replacement. Existing queries can finish using the index they
+started with.
 
-`LifecycleCoordinator.run_once(scope=None)` first evicts purged objects:
-`DocumentEraser.evict_purged` reads the purge-log entries (`rl_purge_log`)
-appended since this engine's watermark and removes their objects from the
-live generations of this engine's engine-local (in-memory) units, under the
-unit lock so a concurrent build cannot re-add them. Engines start following the
-log at its end when the coordinator starts, because their in-memory units are
-built from the store afterwards. If entries the engine never applied were
-pruned (`purge_log_retention`), it rebuilds its engine-local units of that
-scope instead. A failed eviction is logged (`purge_eviction_failed`) and
-retried next round; indexing continues. Then it runs one refresh-engine
-refresh:
+![Generation states: a new index is prepared, becomes active when ready, and replaces the previous index; failed or abandoned builds are not published](../assets/diagrams/generation-states.png){ .diagram }
 
-1. **Discovery.** For every scope and unit, `UnitIndexer.needs_work` checks
-   whether there is no pointer, the active generation has another fingerprint,
-   coverage is pending, documents lack coverage rows, or a rebuild task is
-   open. Each lagging pair becomes a refresh-engine resource.
-2. **Processing.** `UnitIndexer.run(scope, unit)` runs for each resource, at
-   most `max_concurrency` at a time (automatic by default), each bounded by
-   `unit_timeout` from the moment it starts running, and retried
-   up to `max_attempts` times. One lock per (scope, unit, instance) serializes
-   work on a unit within an engine.
-   - Missing coverage rows are created for documents changed after the unit's
-     coverage watermark (the highest `change_seq` already covered); a unit
-     without a watermark reads the scope once.
-   - For per-document units, deleted documents are removed from the active
-     generation.
-   - A **full build** runs when there is a rebuild task, no pointer, a
-     fingerprint change, a keyword dictionary change (the
-     `keyword_dictionary_revision` stat of the active generation differs from
-     `KeywordDictionaryABC.revision`), or pending work
-     on a unit that cannot update in place. Otherwise pending documents are
-     applied **incrementally**.
-3. **Settling tasks.** Tasks whose units are covered succeed. A task whose
-   units still fail after `max_attempts` rounds fails with "units did not
-   reach coverage".
+## Keeping indexes current
 
-## Publishing
+Ingestion stores validated documents and their representations before
+indexing. By default, `ingest()` waits for the configured indexing work, up
+to its wait timeout. The background lifecycle can continue work that remains
+pending. Set `index_wait` and background lifecycle options to match the
+application's latency and availability requirements.
 
-A full build writes a new generation in state `building`, then publishes it in
-one write transaction:
+Routine document changes are applied incrementally when supported by the
+configured backend. A first build, an explicit `rebuild()`, or a change to an
+index's dependencies may require a new build.
 
-- compare-and-swap of the generation pointer (`rl_generation_pointers`) from
-  the previous generation to the new one;
-- the new generation becomes `active`, the previous one `retiring`;
-- coverage rows and version visibility are updated for the indexed documents.
+![Ingestion stores validated documents, then updates the configured search methods; status and retrieval warnings report any work still pending](../assets/diagrams/ingestion-flow.png){ .diagram }
 
-If the pointer moved in the meantime, the transaction fails and the new
-generation is marked `failed` and dropped. After a successful publish the
-indexer tries to retire the previous generation at once. Incremental updates
-commit coverage and visibility the same way, against the active generation.
+Use `backfill()` to index documents a method does not yet cover. Use
+`rebuild()` when a method needs a fresh index, for example after changing an
+embedding model. Both return a task reference that can be passed to
+`wait_for()`. See [Backfill and rebuild](../guide/how-to/backfill-and-rebuild.md).
 
-## In-place updates of the in-memory indexes
+## Failure recovery
 
-The default keyword (`AhoCorasickKeywordIndex`), fuzzy (`RapidFuzzIndex`) and
-sparse (`BM25sIndex`) indexes share `InMemoryGenerationalIndex`
-(`index/memory.py`) and declare `mutable_in_place=True`. None of ahocorasick-rs,
-RapidFuzz or bm25s has an incremental API, so the libraries are used for
-matching and scoring only, and each index keeps its own postings:
+Retryable backend failures can be retried automatically with the configured
+backoff. A non-retryable failure remains visible in status and retrieval
+warnings until its cause is corrected and the affected documents are
+backfilled.
 
-- Before `seal`, writes are staged and built in one offloaded pass.
-- After `seal`, a write is analyzed in the offloader (automaton scan,
-  term counts) and then applied on the event loop without awaiting: the
-  objects it replaces are deleted, the new ones inserted. `remove` deletes
-  objects the same way. Both cost time proportional to the changed objects.
-  A per-generation lock serializes changes; searches never see a
-  half-applied change.
-- After any change the structure equals a fresh build over the live objects,
-  so search results do not depend on the update history:
-  - keyword: canonical-keyword postings; `N` and `df` count live objects;
-  - fuzzy: term postings plus a sorted vocabulary that is re-merged from the
-    added and removed terms on the next search (a new list, so a running
-    match keeps its own);
-  - sparse: term-frequency postings over object slots. `N`, document
-    frequencies and the average length of the live objects are applied with
-    bm25s's idf and term-frequency functions at query time, so scores equal a
-    fresh bm25s index up to bm25s's float32 rounding. Removal marks a slot
-    dead; once dead slots outnumber live ones (and are at least 1,024), a
-    compacted copy is built in the offloader and swapped in.
+Do not treat a partial result as complete. Check `result.status` and
+`result.warnings`, and surface the missing method or indexing failure to the
+caller or operator.
 
-The generation is fixed to the keyword dictionary it was built with
-(`GenerationSpec.keyword_entries`). A full build stores the dictionary's
-revision in the generation's `keyword_dictionary_revision` stat (and the
-digest of its entries in `keyword_entries_digest`); when the dictionary's
-revision differs, the indexer builds a new generation instead of updating in
-place. `MetadataKeywordDictionary` keeps its terms with document counts in
-the metadata store, adjusted by ingest and delete in their own transactions,
-so its revision is one row and changes only when a term appears or
-disappears.
+## Channel changes
 
-## Maintenance
+Channels and methods are configured when an engine is opened. Reopen the
+engine with the desired configuration to add or remove a channel. A newly
+enabled method can index existing documents; use `backfill()` or wait for the
+background lifecycle according to the selected startup and indexing policy.
+The [channel combinations example](../examples/channel-combinations.md)
+demonstrates changes at startup and later in a document lifecycle.
 
-`maintain()` runs at startup and at the start of each background tick:
+## Deletion, erasure and retention
 
-1. Heartbeat this engine instance (`rl_engine_instances`), extending its
-   registration by `instance_ttl`.
-2. Purge expired reader leases.
-3. For every scope and unit, `reconcile`:
-   - try to retire each `retiring` generation;
-   - mark `building` generations of expired instances `abandoned` and drop
-     them;
-   - drop backend generations unknown to the store or no longer live
-     (orphans).
-4. Purge the metadata rows of expired engine instances.
-5. Housekeeping (at most every five minutes in background ticks): erase
-   expired tombstones, then prune ingestion events, version history (events
-   first, because a version stays while an event names it as `version_after`)
-   and purge-log entries older than `purge_log_retention`.
+`delete()` hides a document from retrieval while retaining its history.
+`purge()` physically erases the document and its associated records. Engines
+sharing a metadata store receive erasure updates through their lifecycle
+processing; retrieval validates results against current metadata in the
+meantime.
 
-## Retirement
+Retention settings control how long deleted documents, versions and ingestion
+events remain. A version referenced by a retained ingestion event is preserved
+until that event expires. See
+[Deletion, erasure and retention](../guide/concepts/lifecycle.md#deletion-erasure-and-retention)
+for the application-facing settings.
 
-`UnitIndexer.retire` drops a `retiring` generation only when:
+## Durable and in-memory indexes
 
-- no in-process request reads it (`ReaderTracker`);
-- `generation_retention` seconds have passed since it was retired;
-- for durable units, no other engine instance holds an unexpired reader lease
-  (checked in the same write transaction that marks it `retired`).
+The built-in keyword, fuzzy and sparse indexes are in memory and are rebuilt
+from metadata when an engine opens. Persistent vector, graph and structure
+backends can be reused across restarts when configured with durable storage.
+Each process maintains its own in-memory indexes.
 
-The generation is marked `retired` before its data is dropped, so no reader
-can lease it while it is being dropped. A failed drop leaves an orphan that
-the next `reconcile` removes.
-
-## Reader tracking
-
-`ReaderTracker` counts in-process readers per generation. A generation marked
-retiring accepts no new readers: the request skips that method with a
-`stage_skipped` warning. For durable units, a reader also writes or renews a
-row in `rl_reader_leases` keyed by generation and engine instance, expiring
-after `lease_ttl`. The row is renewed when less than half of the TTL remains,
-and deleted when the instance deregisters.
+For sizing data and restart measurements, see [Benchmarks](../benchmarks.md).

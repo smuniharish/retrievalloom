@@ -112,6 +112,20 @@ Both skills teach the agent the rules that keep an integration correct:
 - never download models at runtime;
 - never weaken a contract kit to make a test pass.
 
+## Skills for integrations
+
+The projects RetrievalLoom integrates with maintain their own skills. These
+are optional and are not installed with RetrievalLoom:
+
+| Integration | Upstream skill | Install |
+| --- | --- | --- |
+| [AGXAI](https://github.com/smuniharish/agxai), for provenance and audit trails | `agxai` and `agxai-extend` | `npx skills add smuniharish/agxai` |
+| [Qdrant](https://qdrant.tech/documentation/agentic-tools/skills/), for vector search | Qdrant Advisor | `npx skills add qdrant/skills/meta/qdrant-advisor` |
+| [FastAPI](https://fastapi.tiangolo.com/ai-development/), for the optional HTTP example | FastAPI | `uvx library-skills install --skill fastapi --yes` |
+
+Install a skill only when your application uses that integration. Follow the
+upstream project's documentation for its scope and update process.
+
 ## Next steps
 
 <div class="grid cards" markdown>

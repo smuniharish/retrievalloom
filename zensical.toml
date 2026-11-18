@@ -106,6 +106,7 @@ nav = [
     { "Contributing" = "development/contributing.md" },
     { "Testing" = "development/testing.md" },
     { "Reliability suites" = "development/reliability.md" },
+    { "Manual release" = "development/release.md" },
   ] },
 ]
 

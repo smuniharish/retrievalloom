@@ -126,7 +126,7 @@ def check_environment(required_extras: set[str]) -> bool:
     version = installed("retrievalloom")
     if version is None:
         return report(False, "retrievalloom is not installed: pip install retrievalloom")
-    report(release(version)[:2] == (0, 1), f"retrievalloom {version} (0.1.x expected)")
+    report(release(version)[:2] == (0, 2), f"retrievalloom {version} (0.2.x expected)")
     for distribution, bounds in REQUIRED.items():
         found = installed(distribution)
         report(

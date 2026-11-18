@@ -16,12 +16,12 @@ description: >-
   library such as LangChain retrievers or LlamaIndex.
 license: Apache-2.0
 compatibility: >-
-  Python 3.12 to 3.14. Installs retrievalloom 0.1.x from PyPI; the graph,
+  Python 3.12 to 3.14. Installs retrievalloom 0.2.x from PyPI; the graph,
   structure, and PostgreSQL features need the graph, structure, and postgres
   extras. scripts/verify_setup.py runs offline in the project's Python
   environment and never downloads models.
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
   documentation: "https://retrievalloom.readthedocs.io"
 ---
 

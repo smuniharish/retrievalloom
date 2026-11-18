@@ -1,121 +1,55 @@
 # Concurrency and isolation
 
-The engine runs on one event loop, shares it with your application, and may
-share its metadata store with other engines. This page describes how it keeps
-the loop responsive, which limits bound concurrent work, what cancellation
-guarantees, and how scopes and engines stay isolated from each other.
+RetrievalLoom exposes an asynchronous API and shares its event loop with the
+calling application. It offloads synchronous model and backend work, bounds
+concurrent work and applies scope checks throughout retrieval and storage.
 
-## The event loop
+## Event-loop responsiveness
 
-All public methods are coroutines and are meant to run on one event loop. The
-engine never blocks it:
+Async backends are awaited directly. Synchronous model or backend calls run
+through the engine's offloader rather than blocking the event loop. Custom
+components should use `context.offloader` for blocking work; see
+[Offloading and admission](../guide/concepts/offloading.md).
 
-- Blocking calls (index builds and queries, local Qdrant, LadybugDB,
-  TreeSearch, FlashRank, embedding validation) run in threads through the
-  [offloader](../guide/concepts/offloading.md).
-- Backends that are not thread-safe (local Qdrant, LadybugDB, TreeSearch's
-  SQLite) use a dedicated single-thread executor, still through the offloader
-  for admission and fair share.
-- Async clients (Qdrant server mode, aiosqlite) are awaited directly.
+All public operations are coroutines. Applications with a synchronous entry
+point should own an event loop and submit coroutines to it rather than using a
+synchronous RetrievalLoom wrapper.
 
-There are no sync wrappers. To call the engine from synchronous code, run it
-on a loop you own (for example in a dedicated thread) and submit coroutines
-with `asyncio.run_coroutine_threadsafe`.
+## Concurrency controls
 
-## Limits
+Ingestion, lifecycle work and offloaded jobs use resource-aware concurrency by
+default. `AutoConcurrency` adapts to available host capacity. Applications
+can set a fixed integer or cap automatic growth. `EngineLimits` controls the
+maximum accepted values.
 
-| Limit | Setting | Effect |
-| --- | --- | --- |
-| Requests per tenant | `TenantPolicy.max_concurrent_requests` (16) | Extra requests wait for a slot until their deadline, then raise `OperationTimeoutError`. |
-| Offloaded jobs per tenant | `TenantPolicy.max_concurrent_offloaded_jobs` (falls back to `OffloaderConfig.max_concurrent_jobs_per_tenant`, 4) | Extra jobs wait for a slot. |
-| Offloaded jobs overall | `OffloaderConfig.max_workers` (`auto`) and resourcera admission | Jobs wait for capacity up to `admission_wait_timeout`, then raise `ResourceAdmissionError`. |
-| CPU-bound offloaded jobs overall | `OffloaderConfig.max_cpu_jobs` (no cap) and `workload_limits` (none) | Jobs over the cap wait on the loop for a slot. Bounds GIL contention from code that holds the GIL. |
-| Graph extractions during ingest | `IngestionConfig.concurrency` (`auto`) | Shared by every `ingest` call of the engine. |
-| Units per lifecycle round | `LifecycleConfig.max_concurrency` (`auto`) | Bounds parallel indexing. |
-| Request duration | `request_timeout`, `method_timeout` | See [Keep the event loop responsive](../guide/how-to/event-loop-latency.md). |
-
-Per-tenant overrides go in `RetrievalConfig.tenant_policies`.
-
-### Automatic sizing
-
-The `auto` settings use an adaptive limiter. It starts at a floor (8 for
-ingestion and I/O-bound jobs, 4 for lifecycle units, `min(8, cpu_count)` for
-CPU-bound jobs) and re-evaluates every two seconds. While permits are waiting,
-it asks the resourcera `ResourceManager` how many more jobs of that workload
-the host can take and grows toward that number. It shrinks when capacity drops
-and halves on an overload signal: an offloaded job, indexing round or graph
-extraction that times out, or a backend that reports itself unavailable. It never leaves `[minimum, maximum]`, where the
-maximum defaults to the matching `EngineLimits` field. Shrinking never revokes
-permits already held; new work simply waits until enough are released.
-
-Each limiter's state appears in `health().details["concurrency"]`, with the
-resource that is currently limiting growth.
-
-### Configurable bounds
-
-Every upper bound on a setting lives in `EngineConfig.limits`
-(`EngineLimits`) and can be raised. See
-[Raise the built-in limits](../getting-started/configuration.md#raise-the-built-in-limits).
-
-## Event-loop lag under load
-
-Worker threads and the loop thread share the GIL, so offloading alone does not
-make the loop's wake-ups free:
-
-- The largest built-in CPU stage, fuzzy matching, releases the GIL while it
-  scores (`rapidfuzz.process.cdist`).
-- Offloaded code that holds the GIL (pure-Python loops in your components)
-  delays the loop more with every thread running it.
-  `OffloaderConfig.max_cpu_jobs` bounds that; see
-  [Capping CPU-bound jobs](../guide/concepts/offloading.md#capping-cpu-bound-jobs)
-  for measurements.
-- Full garbage collections run on the loop thread. With 16 concurrent
-  retrievals over 2,000 documents they were the largest stalls measured
-  (60–80 ms each); `gc.freeze()` after start-up removed most of them. See
-  [Keep the event loop responsive](../guide/how-to/event-loop-latency.md).
+Request and per-tenant limits are configured separately. When work cannot be
+admitted before its deadline, RetrievalLoom surfaces a timeout or resource
+admission error rather than accepting unbounded work. See
+[Configuration](../getting-started/configuration.md#automatic-concurrency).
 
 ## Cancellation
 
-Cancelling a `retrieve`, `ingest` or `delete` is safe:
+Cancelling an operation releases its request and snapshot state. A synchronous
+function already running in a worker thread cannot be forcibly stopped; its
+capacity remains reserved until it completes. This prevents cancelled
+coroutines from making the configured worker capacity appear available too
+early.
 
-- Offloader permits (tenant, workload-kind and CPU slots, and the resourcera
-  lease) are released when the thread finishes, not when the awaiting
-  coroutine is cancelled, so capacity is never over-committed.
-- Snapshot readers and leases are released in `finally` blocks.
-- An indexing round started by a write is not cancelled when the write stops
-  waiting (`index_wait_timeout`); `close()` waits for it.
+## Multiple engines
 
-## Several engines
+Engines can share a SQLite metadata file on one host or PostgreSQL metadata
+across hosts. Durable search backends must also be shared. In-memory indexes
+are local to each process and are refreshed by that engine's lifecycle.
 
-Several `RetrievalEngine` objects can share one metadata store: a SQLite file
-for processes on one host, or a PostgreSQL database for engines on any number
-of hosts.
-
-- Writes of one scope run one at a time: SQLite has a single writer
-  (`BEGIN IMMEDIATE`), and PostgreSQL takes a per-scope advisory lock.
-  Optimistic row revisions detect conflicting updates.
-- Generation pointers move by compare-and-swap, so two engines building the
-  same unit cannot both publish over the same predecessor.
-- Every engine registers an instance row with a heartbeat. Rows of instances
-  that stop heartbeating for `instance_ttl` are purged, and their unfinished
-  builds are abandoned.
-- Durable reader leases keep shared generations alive while another engine
-  reads them.
-- Embedded backend files have one owner process. A second process's
-  `LadybugGraphStore` on the same file fails at startup with
-  `BackendUnavailableError`; share a graph through one owner process or a
-  `GraphStoreABC` on a server database such as Neo4j.
-
-See [Run several engines on one store](../guide/how-to/multiple-engines.md).
+SQLite is intended for a single host. For multi-host deployments, use
+PostgreSQL and a server-backed vector store. Embedded graph and local vector
+database files may have a single-process owner; use a server backend or a
+single owner service when multiple hosts need the same data. See
+[Run several engines on one store](../guide/how-to/multiple-engines.md).
 
 ## Tenant isolation
 
-- A `Scope` (tenant, namespace, collection) is required on every operation.
-- Metadata transactions opened for a scope reject rows of another scope.
-- Every index backend call carries the scope; built-in backends store the
-  scope key with every item (or use one database per scope and generation).
-- Results are validated before they are returned: any object of another scope
-  raises `TenantIsolationError`. This error is never degraded into a warning.
-- The access policy (`AccessPolicyABC`) authorizes each operation and can add
-  a row filter. The default allows everything; replace it in production. See
-  [Filter and authorize](../guide/how-to/filters-and-access.md).
+Every operation takes a `Scope`; backend access and returned evidence are
+checked against it. Configure an access policy for application-level
+authorization. The default policy allows requests and is not a security
+boundary. See [Filter and authorize](../guide/how-to/filters-and-access.md).

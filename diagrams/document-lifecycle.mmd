@@ -1,19 +1,18 @@
 stateDiagram-v2
     direction LR
     [*] --> Current: ingest<br/>version 1
-    Current --> Current: ingest changed content<br/>new version, older objects retired
+    Current --> Current: ingest changed content<br/>new version indexed
     Current --> Tombstone: delete<br/>hidden at once
     Tombstone --> Current: ingest again<br/>revived
-    Tombstone --> Erased: purge(ids), or purge_after<br/>once every unit marked it deleted
+    Tombstone --> Erased: purge(ids) or retention expiry
     Current --> Erased: purge(ids)
     Erased --> [*]
 
     note right of Current
-        Retention keeps the newest max_versions
-        versions and events for event_retention.
+        Updates keep version history
+        according to retention settings.
     end note
     note right of Erased
-        Every metadata row is deleted.
-        Other engines evict the objects
-        through the purge log.
+        Purge physically erases the
+        document and its related records.
     end note

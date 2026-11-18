@@ -22,7 +22,7 @@ For the rules behind it, see
 
 ## How it works
 
-![Adding the structure channel: reopen on the same store, the new unit starts with pending coverage, and it is built before open returns, in the first background round, or on an explicit backfill; until then results are partial with index_missing](../assets/diagrams/channel-changes.png){ .diagram }
+![Reopen an engine with an additional channel; it indexes stored documents and reports a warning until ready](../assets/diagrams/channel-changes.png){ .diagram }
 
 - **Channels are set when the engine opens.** A running engine has no API to switch a
   channel on or off. To change channels, close the engine and open it again with a new
