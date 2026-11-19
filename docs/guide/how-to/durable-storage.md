@@ -13,9 +13,7 @@ from pathlib import Path
 
 from retrievalloom import EngineResources, RetrievalEngine
 
-engine = RetrievalEngine(
-    resources=EngineResources(data_dir=Path("var/retrievalloom"))
-)
+engine = RetrievalEngine(resources=EngineResources(data_dir=Path("var/retrievalloom")))
 ```
 
 | Component | Default location | Created when |

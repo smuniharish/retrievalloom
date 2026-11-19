@@ -41,9 +41,7 @@ class MyEmbedding(EmbeddingModelABC):
         self._model = await self._offloader.run(WorkloadKind.EMBEDDING, load_model)
 
     async def embed_documents(self, texts: Sequence[str]) -> Sequence[Sequence[float]]:
-        return await self._offloader.run(
-            WorkloadKind.EMBEDDING, self._model.encode, list(texts)
-        )
+        return await self._offloader.run(WorkloadKind.EMBEDDING, self._model.encode, list(texts))
 ```
 
 See [Use your own embedding model](../how-to/embedding-model.md) for a
