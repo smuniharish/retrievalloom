@@ -40,13 +40,6 @@ Install an extra only when you need the feature it adds:
     `choco install openssl.light`). Upstream treats this as intended: see
     [LadybugDB/ladybug#775](https://github.com/LadybugDB/ladybug/issues/775).
 
-!!! note "Python 3.15"
-
-    `flashrank`, a base dependency, needs `onnxruntime`, which publishes no Python 3.15
-    wheels yet, so RetrievalLoom declares `requires-python = ">=3.12,<3.15"` until it does.
-    The request is tracked in
-    [microsoft/onnxruntime#33271](https://github.com/microsoft/onnxruntime/issues/33271).
-
 ## What the base install includes
 
 The base package installs everything the default engine uses, so no extra is

@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Live PyPI download badges in the README and documentation home page.
 
+### Changed
+
+- Removed the unsupported Python 3.15 CI canary.
+
 ## [0.2.0]
 
 ### Added
